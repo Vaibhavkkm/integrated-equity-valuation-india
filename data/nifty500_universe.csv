@@ -1,0 +1,69 @@
+ticker,name,sector
+TCS.NS,Tata Consultancy Services,Information Technology
+INFY.NS,Infosys,Information Technology
+WIPRO.NS,Wipro,Information Technology
+HCLTECH.NS,HCL Technologies,Information Technology
+TECHM.NS,Tech Mahindra,Information Technology
+LTIM.NS,LTIMindtree,Information Technology
+HDFCBANK.NS,HDFC Bank,Banking
+ICICIBANK.NS,ICICI Bank,Banking
+SBIN.NS,State Bank of India,Banking
+AXISBANK.NS,Axis Bank,Banking
+KOTAKBANK.NS,Kotak Mahindra Bank,Banking
+INDUSINDBK.NS,IndusInd Bank,Banking
+HINDUNILVR.NS,Hindustan Unilever,FMCG
+ITC.NS,ITC Limited,FMCG
+NESTLEIND.NS,Nestle India,FMCG
+BRITANNIA.NS,Britannia Industries,FMCG
+DABUR.NS,Dabur India,FMCG
+MARICO.NS,Marico,FMCG
+GODREJCP.NS,Godrej Consumer Products,FMCG
+MARUTI.NS,Maruti Suzuki India,Auto
+M&M.NS,Mahindra & Mahindra,Auto
+TATAMOTORS.NS,Tata Motors,Auto
+BAJAJ-AUTO.NS,Bajaj Auto,Auto
+EICHERMOT.NS,Eicher Motors,Auto
+HEROMOTOCO.NS,Hero MotoCorp,Auto
+SUNPHARMA.NS,Sun Pharmaceutical,Pharma
+DRREDDY.NS,Dr Reddy's Laboratories,Pharma
+CIPLA.NS,Cipla,Pharma
+DIVISLAB.NS,Divi's Laboratories,Pharma
+LUPIN.NS,Lupin,Pharma
+TORNTPHARM.NS,Torrent Pharmaceuticals,Pharma
+TATASTEEL.NS,Tata Steel,Metals
+JSWSTEEL.NS,JSW Steel,Metals
+HINDALCO.NS,Hindalco Industries,Metals
+VEDL.NS,Vedanta,Metals
+COALINDIA.NS,Coal India,Metals
+RELIANCE.NS,Reliance Industries,Oil & Gas
+ONGC.NS,Oil and Natural Gas Corporation,Oil & Gas
+BPCL.NS,Bharat Petroleum Corporation,Oil & Gas
+IOC.NS,Indian Oil Corporation,Oil & Gas
+GAIL.NS,GAIL India,Oil & Gas
+BHARTIARTL.NS,Bharti Airtel,Telecom
+IDEA.NS,Vodafone Idea,Telecom
+ULTRACEMCO.NS,UltraTech Cement,Cement
+SHREECEM.NS,Shree Cement,Cement
+AMBUJACEM.NS,Ambuja Cements,Cement
+ACC.NS,ACC Limited,Cement
+LT.NS,Larsen & Toubro,Capital Goods
+SIEMENS.NS,Siemens India,Capital Goods
+ABB.NS,ABB India,Capital Goods
+BHEL.NS,Bharat Heavy Electricals,Capital Goods
+NTPC.NS,NTPC,Power
+POWERGRID.NS,Power Grid Corporation,Power
+TATAPOWER.NS,Tata Power,Power
+ADANIPOWER.NS,Adani Power,Power
+BAJFINANCE.NS,Bajaj Finance,NBFC
+BAJAJFINSV.NS,Bajaj Finserv,NBFC
+HDFCLIFE.NS,HDFC Life Insurance,NBFC
+SBILIFE.NS,SBI Life Insurance,NBFC
+TITAN.NS,Titan Company,Consumer Durables
+HAVELLS.NS,Havells India,Consumer Durables
+VOLTAS.NS,Voltas,Consumer Durables
+ASIANPAINT.NS,Asian Paints,Chemicals
+PIDILITIND.NS,Pidilite Industries,Chemicals
+UPL.NS,UPL,Chemicals
+DLF.NS,DLF Limited,Real Estate
+GODREJPROP.NS,Godrej Properties,Real Estate
+OBEROIRLTY.NS,Oberoi Realty,Real Estate

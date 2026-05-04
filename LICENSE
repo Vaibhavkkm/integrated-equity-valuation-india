@@ -1,0 +1,122 @@
+Copyright (c) 2026 Vaibhav Mangroliya. All Rights Reserved.
+
+Integrated Equity Valuation Engine for Indian Stocks
+Submitted in partial fulfilment of the Semester IV Student Project,
+under the supervision of Mr. Senthil Nagarajan.
+
+================================================================================
+                         RESTRICTIVE LICENSE NOTICE
+================================================================================
+
+This repository is published publicly for the sole purposes of academic
+review, recruiter visibility, and personal study. The source code,
+documentation, design, methodology, test suite, and accompanying assets
+(collectively, the "Work") remain the exclusive intellectual property of
+the copyright holder named above.
+
+The default state of all rights in the Work is "All Rights Reserved."
+Public visibility on GitHub does NOT constitute a grant of any licence
+beyond what is expressly stated below.
+
+--------------------------------------------------------------------------------
+1. WHAT YOU MAY DO  (without prior written permission)
+--------------------------------------------------------------------------------
+
+You may, free of charge:
+
+  (a) View and read the source code on GitHub;
+  (b) Fork this repository through the GitHub platform for the strict
+      purpose of (i) submitting a pull request back to this repository,
+      or (ii) personal, non-commercial, non-academic study only;
+  (c) Cite this repository in academic work, blog posts, or articles,
+      provided full attribution to the copyright holder is given and a
+      link to this repository is included.
+
+--------------------------------------------------------------------------------
+2. WHAT YOU MAY NOT DO  (without prior written permission)
+--------------------------------------------------------------------------------
+
+The following are EXPRESSLY PROHIBITED:
+
+  (a) Copying, reproducing, or extracting any portion of the Work into
+      another repository, project, codebase, document, or medium,
+      whether modified or unmodified;
+
+  (b) Submitting any portion of the Work — verbatim, paraphrased,
+      translated, refactored, or otherwise derived — as your own
+      coursework, dissertation, project, thesis, or assignment to any
+      educational institution. This is plagiarism and will be reported;
+
+  (c) Redistributing the Work, in source or compiled form, with or
+      without modification, to any third party;
+
+  (d) Using the Work, in whole or in part, in any commercial product,
+      service, paid offering, consultancy deliverable, SaaS platform,
+      or revenue-generating activity;
+
+  (e) Using the Work, in whole or in part, to train, fine-tune,
+      evaluate, or benchmark any machine-learning, AI, or large-language
+      model — including the use of the Work as part of a training
+      corpus, retrieval index, or evaluation dataset;
+
+  (f) Removing or altering the copyright notice, this licence, or any
+      attribution within the Work;
+
+  (g) Sub-licensing the Work or any portion thereof.
+
+--------------------------------------------------------------------------------
+3. ACADEMIC INTEGRITY CLAUSE
+--------------------------------------------------------------------------------
+
+The Work was created and submitted as original coursework. The git
+commit history of this repository establishes incontrovertible
+authorship and timeline. If you are a student considering submitting
+any part of this Work as your own academic project:
+
+  - You will be discovered (plagiarism-detection tools index public
+    GitHub repositories);
+  - Your institution will be notified, with the original timestamps and
+    authorship records as evidence;
+  - You will face the consequences your institution prescribes for
+    academic dishonesty.
+
+Don't.
+
+--------------------------------------------------------------------------------
+4. NO WARRANTY
+--------------------------------------------------------------------------------
+
+THE WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. IN NO EVENT
+SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY ARISING FROM, OUT OF, OR IN CONNECTION WITH THE WORK OR THE
+USE OR OTHER DEALINGS IN THE WORK.
+
+The financial valuations produced by the Work are educational outputs
+of a methodology and do not constitute investment advice. The author
+disclaims all liability for any investment, trading, or financial
+decision made on the basis of outputs produced by the Work.
+
+--------------------------------------------------------------------------------
+5. PERMISSIONS BEYOND THIS LICENCE
+--------------------------------------------------------------------------------
+
+Any use not expressly permitted in Section 1 requires PRIOR WRITTEN
+PERMISSION from the copyright holder. To request a licence — for
+example, for commercial use, redistribution, or incorporation into a
+third-party product — please open an issue on this repository or
+contact the author through the GitHub profile linked above.
+
+--------------------------------------------------------------------------------
+6. GOVERNING LAW
+--------------------------------------------------------------------------------
+
+This licence shall be governed by and construed in accordance with the
+laws of India, without regard to its conflict-of-law provisions.
+
+================================================================================
+
+By cloning, forking, downloading, or otherwise accessing this
+repository, you acknowledge that you have read this licence and agree
+to be bound by its terms.

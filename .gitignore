@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+.python-version
+
+# Project artefacts
+cache/*.pkl
+reports/*.pdf
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
