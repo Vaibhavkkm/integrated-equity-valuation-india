@@ -136,7 +136,7 @@ DEFAULT_UNIVERSE: Dict[str, str] = {
     # Auto
     "MARUTI.NS": "Auto",
     "M&M.NS": "Auto",
-    "TATAMOTORS.NS": "Auto",
+    "TVSMOTOR.NS": "Auto",
     "BAJAJ-AUTO.NS": "Auto",
     "EICHERMOT.NS": "Auto",
     "HEROMOTOCO.NS": "Auto",
