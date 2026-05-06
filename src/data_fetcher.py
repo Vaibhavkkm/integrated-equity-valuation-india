@@ -297,23 +297,56 @@ def _attach_quality(bundle: StockBundle) -> None:
         log.warning("validation: failed to score %s (%s)", bundle.ticker, exc)
 
 
+def _looks_empty(info: dict, hist: pd.DataFrame) -> bool:
+    """yfinance returned nothing usable for this ticker (transient or dead)."""
+    no_info = (not info) or (
+        info.get("regularMarketPrice") is None
+        and info.get("currentPrice") is None
+        and info.get("previousClose") is None
+    )
+    return no_info and (hist is None or hist.empty)
+
+
 def _fetch_from_yahoo(ticker: str, sector: str) -> StockBundle:
-    """The actual network call. Wrapped because it's the bit that fails."""
+    """The actual network call. Wrapped because it's the bit that fails.
+
+    yfinance is famously flaky — empty `info` dicts, missing schema fields,
+    and 429 rate-limits are routine. We do ONE silent retry before giving
+    up; if the second attempt is also empty we raise `DataSourceUnavailable`
+    so the outer handler can fall through to the stale-cache path. We do
+    NOT raise `TickerNotFoundError` here, because empty data from yfinance
+    is rarely strong evidence of a non-existent ticker — it's almost
+    always a transient API issue, and treating it as fatal makes valid
+    large-caps like TATAMOTORS.NS look "not found" during yfinance
+    hiccups.
+    """
     yticker = yf.Ticker(ticker)
 
-    # Suppress yfinance's chatty warnings inside this scope only.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
 
         info = _safe_info(yticker)
         hist = yticker.history(period="5y", auto_adjust=True)
+
+        if _looks_empty(info, hist):
+            log.info("yahoo: empty response for %s; retrying once", ticker)
+            time.sleep(0.8)
+            info = _safe_info(yticker)
+            hist = yticker.history(period="5y", auto_adjust=True)
+
         income_stmt = _safe_statement(yticker, "income_stmt")
         balance_sheet = _safe_statement(yticker, "balance_sheet")
         dividends = yticker.dividends if hasattr(yticker, "dividends") else pd.Series(dtype=float)
 
-    # If yfinance gave us literally nothing, treat as a not-found.
-    if (not info or info.get("regularMarketPrice") is None) and hist.empty:
-        raise TickerNotFoundError(ticker)
+    if _looks_empty(info, hist):
+        # Could be a dead ticker, could be yfinance throttling.
+        # Either way, surface as DataSourceUnavailable so the outer
+        # `fetch_stock` handler tries the stale cache before giving up.
+        raise DataSourceUnavailable(
+            f"yfinance returned no usable data for '{ticker}' after retry. "
+            f"This is most often a transient rate-limit or schema-drift "
+            f"issue; the engine will fall back to cached data if available."
+        )
 
     name = info.get("longName") or info.get("shortName") or ticker
     price = _safe_float(info.get("currentPrice")) or _safe_float(info.get("regularMarketPrice"))
