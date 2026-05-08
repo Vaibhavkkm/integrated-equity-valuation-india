@@ -101,16 +101,23 @@ def validate_bundle(bundle, *, strict: bool = True) -> DataQualityReport:
     bvps = getattr(bundle, "book_value_per_share", float("nan"))
     if np.isfinite(eps) and abs(eps) > 100_000:
         warnings.append(f"EPS of {eps:,.0f} is implausibly large; check for unit error.")
-    if np.isfinite(bvps) and bvps < 0:
-        warnings.append("Negative book value — bank/insurer covenant breach or accumulated losses.")
+    if np.isfinite(bvps) and bvps <= 0:
+        warnings.append("Non-positive book value — accumulated losses or covenant breach; P/B will be skipped.")
 
-    roe = getattr(bundle, "roe", 0.0)
+    roe = getattr(bundle, "roe", float("nan"))
     if np.isfinite(roe) and abs(roe) > 1.5:
         warnings.append(f"ROE of {roe:.0%} is extreme; one-off items likely.")
 
-    payout = getattr(bundle, "payout_ratio", 0.0) or 0.0
+    # Inspect the *raw* (uncapped) payout where available — the capped
+    # value tops out at 1.0 and cannot reveal Vedanta-style 190% extraction.
+    payout_raw = getattr(bundle, "payout_ratio_raw", float("nan"))
+    payout_capped = getattr(bundle, "payout_ratio", 0.0) or 0.0
+    payout = payout_raw if np.isfinite(payout_raw) else payout_capped
     if payout > 1.5:
-        warnings.append(f"Payout ratio of {payout:.0%} suggests dividends from reserves.")
+        warnings.append(
+            f"Payout ratio of {payout:.0%} indicates dividends financed "
+            "from debt or reserves rather than earnings; DDM will be skipped."
+        )
 
     # 3. History depth ------------------------------------------------------
     eps_series = getattr(bundle, "earnings_annual", pd.Series(dtype=float))
@@ -131,8 +138,15 @@ def validate_bundle(bundle, *, strict: bool = True) -> DataQualityReport:
         warnings.append("Price history < 60 days — beta will fall back to sector estimate.")
 
     # 5. Dividend history ---------------------------------------------------
+    # Require at least 2 years of *positive* DPS — a single one-off return
+    # of capital (or a one-year special dividend) shouldn't qualify a name
+    # as a "dividend payer" for DDM purposes.
     div_series = getattr(bundle, "dividends_annual", pd.Series(dtype=float))
-    has_dividends = div_series is not None and not div_series.empty and div_series.sum() > 0
+    if div_series is not None and not div_series.empty:
+        positive_div_years = int((div_series > 0).sum())
+        has_dividends = positive_div_years >= 2
+    else:
+        has_dividends = False
 
     # 6. Completeness --------------------------------------------------------
     present = sum(

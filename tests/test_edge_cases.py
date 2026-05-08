@@ -120,6 +120,50 @@ def test_selector_runs_for_loss_maker_with_dividends():
     assert iv.value_per_share == iv.value_per_share  # not NaN check via self-equality
 
 
+def test_selector_skips_unsustainable_payout():
+    """Vedanta-style 190% payout: dividend financed by debt, not earnings.
+
+    DDM's perpetuity assumption breaks because the dividend stream is
+    not sustainable from operating cash flow. Must defer to relative.
+    """
+    dps = pd.Series(
+        [30.0, 30.0, 30.0, 30.0, 30.0, 30.0],
+        index=pd.date_range(end="2025-12-31", periods=6, freq="YE"),
+    )
+    iv = select_and_value(
+        eps_ttm=17.0,
+        dps_ttm=34.0,
+        payout_ratio=1.0,             # capped value the modelling layer sees
+        payout_ratio_raw=1.90,        # uncapped truth
+        roe=0.18, ke=0.13,
+        historical_dps=dps,
+        historical_eps=pd.Series([20, 15, 18, 12, 10, 17],
+                                 index=pd.date_range(end="2025-12-31", periods=6, freq="YE")),
+    )
+    assert not iv.valid
+    assert "190%" in iv.note or "Unsustainable" in iv.inputs.get("reason", "")
+
+
+def test_selector_does_not_skip_for_high_but_sustainable_payout():
+    """A 95% payout is high but earned — DDM should still produce a value."""
+    dps = pd.Series(
+        [10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+        index=pd.date_range(end="2025-12-31", periods=6, freq="YE"),
+    )
+    iv = select_and_value(
+        eps_ttm=16.0,
+        dps_ttm=15.0,
+        payout_ratio=0.95,
+        payout_ratio_raw=0.95,
+        roe=0.18, ke=0.13,
+        historical_dps=dps,
+        historical_eps=pd.Series([10, 11, 13, 14, 15, 16],
+                                 index=pd.date_range(end="2025-12-31", periods=6, freq="YE")),
+    )
+    assert iv.valid
+    assert iv.value_per_share > 0
+
+
 # ---------------------------------------------------------------------------
 # Quality score robustness
 # ---------------------------------------------------------------------------

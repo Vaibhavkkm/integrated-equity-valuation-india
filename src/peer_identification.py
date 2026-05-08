@@ -64,8 +64,28 @@ class PeerSet:
 # Feature extraction
 # ---------------------------------------------------------------------------
 def _extract_features(b: StockBundle) -> dict:
-    log_mcap = np.log(b.market_cap) if (b.market_cap and b.market_cap > 0) else np.nan
-    de = (b.total_debt / b.equity) if (b.equity and b.equity > 0) else np.nan
+    # Floor at ₹10 crore to keep log() out of the long left tail; below
+    # that, "log of micro-cap" is more noise than signal and would yank
+    # the firm into a cluster of its own.
+    if b.market_cap and b.market_cap >= 100_000_000:
+        log_mcap = float(np.log(b.market_cap))
+    else:
+        log_mcap = np.nan
+
+    # D/E only meaningful when equity is positive *and* debt is non-
+    # negative. Negative-equity firms (accumulated losses) and any
+    # debt-data glitch get flagged as missing rather than producing
+    # negative leverage figures that distort clustering.
+    if (b.equity and b.equity > 0
+            and b.total_debt is not None
+            and np.isfinite(b.total_debt)
+            and b.total_debt >= 0):
+        de = b.total_debt / b.equity
+    else:
+        de = np.nan
+
+    # ROE: NaN propagates correctly through median imputation downstream.
+    roe = b.roe if np.isfinite(b.roe) else np.nan
 
     # 5-year revenue CAGR
     rev = b.revenue_annual.dropna()
@@ -79,7 +99,7 @@ def _extract_features(b: StockBundle) -> dict:
 
     return {
         "log_market_cap": log_mcap,
-        "roe": b.roe,
+        "roe": roe,
         "debt_to_equity": de,
         "payout_ratio": b.payout_ratio,
         "revenue_growth_5y": rev_g,
@@ -91,8 +111,11 @@ def _build_feature_matrix(bundles: List[StockBundle]) -> pd.DataFrame:
     rows = {b.ticker: _extract_features(b) for b in bundles}
     df = pd.DataFrame.from_dict(rows, orient="index", columns=_FEATURE_NAMES)
     # Median-impute missing values so clustering doesn't choke; firms with
-    # truly bad data will be filtered out later.
-    df = df.fillna(df.median(numeric_only=True))
+    # truly bad data will be filtered out later. If a whole column is NaN
+    # (e.g. EBITDA margin / D-to-E for banks), median is NaN too — fall
+    # back to 0 so KMeans can still run. The matrix is z-scored downstream,
+    # so a constant column contributes nothing to the cluster geometry.
+    df = df.fillna(df.median(numeric_only=True)).fillna(0.0)
     return df
 
 

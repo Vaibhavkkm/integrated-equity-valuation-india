@@ -122,6 +122,7 @@ def _ddm_value(target: StockBundle, ke: float, g_term: float, payout: float) -> 
         historical_dps=target.dividends_annual,
         historical_eps=target.earnings_annual,
         sector_g_terminal=g_term,
+        payout_ratio_raw=getattr(target, "payout_ratio_raw", float("nan")),
     )
     return float(iv.value_per_share) if iv.valid else float("nan")
 

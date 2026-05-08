@@ -188,15 +188,20 @@ def _blend_weights(
     # almost always the DDM, because the dividend stream alone can't
     # capture brand premia / growth optionality the market is paying
     # for. Lean toward the relative track in that case.
-    ratio = ddm.value_per_share / rel.weighted_value
-    if np.isfinite(ratio) and ratio > 0:
-        if ratio < 0.40:
-            tilt -= 0.20
-        elif ratio < 0.65:
-            tilt -= 0.10
-        elif ratio > 2.50:
-            tilt -= 0.10  # the rare opposite case — Rel is suspect, but DDM
-                          # alone is also not safe; small de-emphasis.
+    if (
+        np.isfinite(rel.weighted_value)
+        and rel.weighted_value > 0
+        and np.isfinite(ddm.value_per_share)
+    ):
+        ratio = ddm.value_per_share / rel.weighted_value
+        if ratio > 0:
+            if ratio < 0.40:
+                tilt -= 0.20
+            elif ratio < 0.65:
+                tilt -= 0.10
+            elif ratio > 2.50:
+                tilt -= 0.10  # the rare opposite case — Rel is suspect, but DDM
+                              # alone is also not safe; small de-emphasis.
 
     tilt = float(np.clip(tilt, -0.45, 0.15))
     w_ddm = float(np.clip(base_w_ddm + tilt, 0.10, 0.80))
@@ -396,6 +401,7 @@ def value_stock(
         historical_dps=target.dividends_annual,
         historical_eps=target.earnings_annual,
         sector_g_terminal=g_term,
+        payout_ratio_raw=getattr(target, "payout_ratio_raw", float("nan")),
     )
     if verbose:
         log.info("  DDM: %s", ddm)

@@ -178,20 +178,30 @@ def _trimmed_harmonic_mean(values: pd.Series, trim_pct: float) -> float:
 # ---------------------------------------------------------------------------
 def _implied_price(target: StockBundle, multiple_name: str, agg_multiple: float):
     """Returns (implied_price, target_metric_used)."""
-    if not np.isfinite(agg_multiple):
+    if not np.isfinite(agg_multiple) or agg_multiple <= 0:
         return float("nan"), float("nan")
 
     if multiple_name == "PE":
         m = target.eps_ttm
+        # Negative EPS ⇒ negative implied price; loss-making targets must
+        # fall back to P/B / P/S / EV-EBITDA, not contaminate the blend.
+        if not np.isfinite(m) or m <= 0:
+            return float("nan"), m
         return agg_multiple * m, m
     if multiple_name == "PB":
         m = target.book_value_per_share
+        # Negative book value (accumulated losses, equity erosion): the
+        # P/B multiple has no economic interpretation — drop it cleanly.
+        if not np.isfinite(m) or m <= 0:
+            return float("nan"), m
         return agg_multiple * m, m
     if multiple_name == "PS":
         rev_ok, _ = _has_consistent_units(target)
         if not rev_ok:
             return float("nan"), float("nan")
         m = target.sales_per_share_ttm
+        if not np.isfinite(m) or m <= 0:
+            return float("nan"), m
         return agg_multiple * m, m
     if multiple_name == "EV_EBITDA":
         _, ebitda_ok = _has_consistent_units(target)
@@ -202,6 +212,12 @@ def _implied_price(target: StockBundle, multiple_name: str, agg_multiple: float)
         implied_ev = agg_multiple * target.ebitda
         equity_value = implied_ev - target.total_debt + target.cash
         if not np.isfinite(target.shares_outstanding) or target.shares_outstanding <= 0:
+            return float("nan"), target.ebitda
+        # If debt exceeds the implied enterprise value (overleveraged
+        # distressed firm), equity_value goes negative — the multiple is
+        # telling us equity is underwater. That is information, but not a
+        # *price* the comparable-company method can produce honestly.
+        if equity_value <= 0:
             return float("nan"), target.ebitda
         return equity_value / target.shares_outstanding, target.ebitda
     if multiple_name == "PEG":
@@ -309,6 +325,7 @@ def value_by_multiples(
         (k, results[k].implied_price)
         for k in results if results[k].valid
     ]
+    notes: list[str] = []
     if len(valid_implied) >= 3:
         med = float(np.median([v for _, v in valid_implied]))
         if med > 0:
@@ -319,6 +336,14 @@ def value_by_multiples(
                         f"Implied price ₹{v:,.0f} is {v/med:.1f}× peer median "
                         f"(₹{med:,.0f}); excluded as outlier."
                     )
+    elif len(valid_implied) >= 1:
+        # Fewer than 3 valid multiples means we can't cross-check for
+        # bad data — flag low confidence so the integrated blender and
+        # confidence scorer see this is fragile.
+        notes.append(
+            f"Only {len(valid_implied)} valid multiple(s) — relative "
+            "valuation has no peer cross-check; treat as LOW confidence."
+        )
 
     # Sector-aware weights, dropping invalid multiples and renormalising.
     base_weights = SECTOR_OVERRIDES.get(target.sector, DEFAULT_MULTIPLE_WEIGHTS)
@@ -344,4 +369,5 @@ def value_by_multiples(
         weighted_value=float(weighted),
         weights=valid_weights,
         median_value=median_v,
+        notes=notes,
     )

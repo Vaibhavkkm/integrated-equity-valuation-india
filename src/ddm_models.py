@@ -459,6 +459,7 @@ def select_and_value(
     historical_dps: pd.Series,
     historical_eps: pd.Series,
     sector_g_terminal: Optional[float] = None,
+    payout_ratio_raw: Optional[float] = None,
 ) -> IntrinsicValue:
     """Pick the most appropriate DDM variant and return its valuation.
 
@@ -518,6 +519,32 @@ def select_and_value(
             ),
         )
 
+    # Unsustainable-payout guard: a firm like Vedanta pays ₹34/share on
+    # EPS of ₹17 (raw payout = 1.9). The dividend isn't financed from
+    # earnings — it's debt-funded extraction by the parent. Capitalising
+    # this DPS as a forever-cashflow gives an absurd intrinsic value
+    # (Gordon prices ₹34 × 1.05 / (Ke − g) ≈ ₹400-500 on a ₹296 stock).
+    # The capped `payout_ratio` (1.0) hides this from the algebra, so
+    # we check the raw value here and fall through to relative valuation.
+    if (
+        payout_ratio_raw is not None
+        and np.isfinite(payout_ratio_raw)
+        and payout_ratio_raw > 1.20
+        and np.isfinite(eps_ttm) and eps_ttm > 0
+    ):
+        return IntrinsicValue(
+            value_per_share=float("nan"),
+            model="DDM (skipped)",
+            inputs=dict(reason="Unsustainable payout", payout_ratio_raw=payout_ratio_raw),
+            valid=False,
+            note=(
+                f"Payout ratio of {payout_ratio_raw:.0%} exceeds 100% — "
+                "dividends are funded from debt or asset sales, not earnings, "
+                "so the DDM's perpetuity assumption breaks down. Valuation "
+                "defers to the relative-valuation track."
+            ),
+        )
+
     # Near-non-payer guard: a firm earning ₹60/share but paying ₹2/share
     # (HGINFRA-style infra/EPC reinvestors) has a 3% payout. DDM only
     # prices the dividend stream, so it values the ₹2 and ignores the
@@ -545,9 +572,17 @@ def select_and_value(
     # then Bayes-shrink toward a 5% prior — short series get pulled in
     # harder, long series barely move. This is the project's defence
     # against extrapolating noisy 3-year CAGRs into perpetuity.
+    #
+    # SGR is suppressed when ROE is missing or non-positive (distressed /
+    # loss-making firms): a negative-ROE × positive-retention product
+    # contaminates the blend with implied dividend shrinkage that the
+    # historical track may already disagree with.
     g_hist_raw = historical_dividend_cagr(historical_dps)
-    g_sgr = sustainable_growth_rate(roe, payout_ratio)
-    g_blend = 0.5 * g_hist_raw + 0.5 * g_sgr
+    if np.isfinite(roe) and roe > 0 and np.isfinite(payout_ratio):
+        g_sgr = sustainable_growth_rate(roe, payout_ratio)
+        g_blend = 0.5 * g_hist_raw + 0.5 * g_sgr
+    else:
+        g_blend = g_hist_raw
     n_obs = int((historical_dps.dropna() > 0).sum())
     g_high = float(np.clip(
         bayesian_growth_shrinkage(g_blend, n_observations=n_obs),
@@ -559,18 +594,31 @@ def select_and_value(
 
     n_years_div_history = (historical_dps > 0).sum()
 
+    # Defensive: payout_ratio NaN propagates silently through `>=` /
+    # `<` comparisons (always False), which can route a stock to the
+    # wrong model branch. Anchor on a 30% prior when missing.
+    payout_for_branch = (
+        float(payout_ratio)
+        if (payout_ratio is not None and np.isfinite(payout_ratio))
+        else 0.30
+    )
+
     # --- Gordon: mature, slow grower ---
     is_mature = (
         n_years_div_history >= 5
         and g_high <= g_terminal + 0.015
-        and payout_ratio >= 0.40
+        and payout_for_branch >= 0.40
     )
     if is_mature:
         d1 = dps_ttm * (1 + g_terminal)
         return gordon_growth(d1=d1, ke=ke, g=g_terminal)
 
     # --- H-Model: fast grower with low payout ---
-    is_high_growth = g_high >= 0.12 or payout_ratio < 0.30
+    # Require g_high > 0 — a shrinking dividend stream with low payout
+    # belongs in three-stage (which can model the fade explicitly), not
+    # H-Model (whose closed form assumes the high-stage growth fades
+    # *down* to terminal, not up).
+    is_high_growth = (g_high > 0) and (g_high >= 0.12 or payout_for_branch < 0.30)
     if is_high_growth:
         return h_model(
             d0=dps_ttm,

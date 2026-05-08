@@ -187,17 +187,32 @@ class StockBundle:
     book_value_annual: pd.Series
 
     # Derived & meta
-    payout_ratio: float                         # DPS / EPS, TTM
+    payout_ratio: float                         # DPS / EPS, TTM (capped at 1.0)
     roe: float
     enterprise_value: float
     fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     source: str = "yfinance"                    # which provider supplied this
     quality_score: Optional[float] = None       # populated by validate_bundle()
+    # Uncapped payout — set in __post_init__ from the original raw value.
+    # Used downstream to detect over-distribution (>100% payout) where the
+    # company is funding dividends from debt rather than earnings.
+    payout_ratio_raw: float = field(default=float("nan"))
 
     # Convenience
     def __post_init__(self):
-        # Defensive: payout ratio caps at 1.0 (anything higher means the
-        # company is paying from reserves — treat as 100% for modelling).
+        # Preserve the *raw* payout for downstream sustainability checks
+        # (Vedanta-style firms pay 190% of EPS by financing dividends from
+        # debt or asset sales — DDM must see this is unsustainable rather
+        # than treat the inflated DPS as a forever-cashflow).
+        raw_payout = self.payout_ratio
+        if raw_payout is not None and np.isfinite(raw_payout):
+            self.payout_ratio_raw = float(raw_payout)
+        else:
+            self.payout_ratio_raw = float("nan")
+
+        # Cap modelling payout at 1.0 (anything higher means the company is
+        # paying from reserves — treat as 100% for the sustainable-growth
+        # algebra). Floor at 0 so retention math doesn't go negative.
         if self.payout_ratio is not None and self.payout_ratio > 1.0:
             self.payout_ratio = 1.0
         if self.payout_ratio is not None and self.payout_ratio < 0:
@@ -504,10 +519,19 @@ def _fetch_from_yahoo(ticker: str, sector: Optional[str]) -> StockBundle:
     book_value_per_share = _safe_float(info.get("bookValue"))
     if not np.isfinite(book_value_per_share) and not bvps_annual.empty:
         book_value_per_share = float(bvps_annual.iloc[-1])
+    # Negative BVPS (accumulated losses, equity-erosion firms) makes P/B
+    # multiples meaningless — surface as NaN so relative valuation drops
+    # the multiple instead of producing a negative implied price.
+    if np.isfinite(book_value_per_share) and book_value_per_share <= 0:
+        book_value_per_share = np.nan
 
     revenue = _safe_float(info.get("totalRevenue"))
     if not np.isfinite(revenue) and not revenue_annual.empty:
         revenue = float(revenue_annual.iloc[-1])
+    # Yahoo occasionally returns negative revenue from a bad statement
+    # parse (return/credit-memo edge case). Treat as missing.
+    if np.isfinite(revenue) and revenue < 0:
+        revenue = np.nan
 
     fcf = _safe_float(info.get("freeCashflow"))
     fcf_per_share = fcf / shares if (np.isfinite(fcf) and np.isfinite(shares) and shares > 0) else np.nan
@@ -580,6 +604,12 @@ def _fetch_from_yahoo(ticker: str, sector: Optional[str]) -> StockBundle:
     roe = _safe_float(info.get("returnOnEquity"))
     if not np.isfinite(roe) and np.isfinite(net_income) and np.isfinite(equity) and equity > 0:
         roe = net_income / equity
+    # ROE computed against negative equity is mathematically defined but
+    # economically nonsense — a distressed firm with -₹50cr equity and
+    # ₹20cr income has ROE = -40%, which would skew clustering and
+    # quality scoring. Mark as missing instead.
+    if np.isfinite(roe) and np.isfinite(equity) and equity <= 0:
+        roe = np.nan
 
     enterprise_value = _safe_float(info.get("enterpriseValue"))
     if not np.isfinite(enterprise_value) and np.isfinite(market_cap):
@@ -613,7 +643,7 @@ def _fetch_from_yahoo(ticker: str, sector: Optional[str]) -> StockBundle:
         revenue_annual=revenue_annual,
         book_value_annual=bvps_annual,
         payout_ratio=payout_ratio,
-        roe=roe if np.isfinite(roe) else 0.0,
+        roe=roe if np.isfinite(roe) else np.nan,
         enterprise_value=enterprise_value,
         source="yfinance",
     )

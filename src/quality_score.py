@@ -200,9 +200,21 @@ def dividend_quality(b: StockBundle) -> tuple[int, dict]:
     else:
         breakdown["track_record"] = 0
 
-    # 3. No major cuts in last 5 years
+    # 3. No major cuts in last 5 years.
+    # The relative-cut test (`diff < -prev * 0.20`) misses outright
+    # suspensions because the diff goes from prev → 0 and the threshold
+    # `-prev * 0.20` is typically larger in magnitude. Count year-on-year
+    # transitions that drop ≥20% — including suspensions to zero — by
+    # working with the ratio `curr / prev` directly.
     recent = dps[-5:] if len(dps) >= 5 else dps
-    cuts = (recent.diff() < -recent.shift() * 0.20).sum()
+    if len(recent) >= 2:
+        prev = recent.shift()
+        ratio = recent / prev
+        # Drop the first row (NaN from shift) and any row where prev<=0
+        cuts_mask = (prev > 0) & (ratio < 0.80)
+        cuts = int(cuts_mask.sum())
+    else:
+        cuts = 0
     if cuts == 0:
         score += 2
         breakdown["no_major_cuts"] = 2
@@ -212,11 +224,16 @@ def dividend_quality(b: StockBundle) -> tuple[int, dict]:
     else:
         breakdown["no_major_cuts"] = 0
 
-    # 4. Sustainable payout (< 80%)
-    if 0 < b.payout_ratio < 0.80:
+    # 4. Sustainable payout (< 80%). Use the *raw* (uncapped) payout —
+    # the modelling field tops out at 1.0 and would silently treat a
+    # debt-funded 190% extraction the same as a healthy 100% payer.
+    payout_for_quality = getattr(b, "payout_ratio_raw", float("nan"))
+    if not np.isfinite(payout_for_quality):
+        payout_for_quality = b.payout_ratio
+    if 0 < payout_for_quality < 0.80:
         score += 2
         breakdown["sustainable_payout"] = 2
-    elif b.payout_ratio < 1.0:
+    elif payout_for_quality < 1.0:
         score += 1
         breakdown["sustainable_payout"] = 1
     else:
