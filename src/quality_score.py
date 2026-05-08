@@ -1,12 +1,13 @@
 """
 Quality scoring — feeds the credibility-weighted blender.
 
-We compute three independent scores and fold them into a single 0-100
+We compute four independent scores and fold them into a single 0-100
 quality number:
 
   * Piotroski F-Score (0-9)        — fundamental health.
   * Altman Z'' (modified for EM)   — distress likelihood.
   * Dividend Quality Score (0-10)  — track record + payout sanity.
+  * Earnings Momentum (0-10)       — recent quarterly trend vs peers.
 
 Why bother? Because the 50/50 DDM-vs-Relative weight in the original
 project brief is brittle. If a stock has paid dividends for two years
@@ -14,22 +15,36 @@ straight after a long drought, blindly trusting the DDM is silly. By
 nudging the blend toward whichever model is more defensible per stock,
 we get a more robust intrinsic value — and the supervisor gets a clean
 audit trail of *why* the weights moved.
+
+Earnings momentum was added as the fourth pillar because the long-run
+DDM/Relative tracks alone can't see whether the firm's *recent* quarters
+support the thesis. It's a confidence-modulating overlay (it does not
+move the price target itself) — the long-horizon valuation is still
+driven by Bayes-shrunk historical growth in the DDM and peer multiples
+in the relative track.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Optional
+
 import numpy as np
 
 from src.data_fetcher import StockBundle
+from src.earnings_momentum import EarningsMomentum
 
 
 @dataclass
 class QualityScore:
     piotroski_f: int
     altman_z: float
-    dividend_quality: int       # 0-10
-    composite: float            # 0-100
+    dividend_quality: int               # 0-10
+    composite: float                    # 0-100
     breakdown: dict
+    earnings_momentum: int = 0          # 0-10; defaults to 0 when momentum
+                                        # data is unavailable (callers can
+                                        # construct without passing it).
+    momentum_detail: Optional[EarningsMomentum] = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -253,47 +268,70 @@ def dividend_quality(b: StockBundle) -> tuple[int, dict]:
 # ---------------------------------------------------------------------------
 # Public composite
 # ---------------------------------------------------------------------------
-def quality_score(b: StockBundle) -> QualityScore:
+def quality_score(
+    b: StockBundle,
+    *,
+    momentum: Optional[EarningsMomentum] = None,
+) -> QualityScore:
     """Composite 0-100 quality score for ``b``.
 
-    Blends Piotroski (35%), Altman Z'' (30%), and dividend quality (35%)
-    on a calibration that maps an "average firm" to roughly 50. The
-    individual sub-scores are returned alongside so the dashboard and
-    PDF report can show the full breakdown.
+    Blends Piotroski (30%), Altman Z'' (25%), dividend quality (25%), and
+    earnings momentum (20%) on a calibration that still maps an "average
+    firm" to roughly 50. Earlier versions used 35/30/35 without a
+    momentum pillar; the rebalance shaves ~5 pp from each existing
+    pillar to make room without inflating the composite.
+
+    When ``momentum`` is omitted (the integrated pipeline always passes
+    one; standalone callers may not), the momentum pillar contributes
+    its mid-point to keep the composite calibration symmetric — that is,
+    not knowing momentum should not look like *bad* momentum.
 
     Parameters
     ----------
     b : StockBundle
         Target firm — passed through to each sub-scorer.
+    momentum : EarningsMomentum, optional
+        Pre-computed momentum overlay (see ``earnings_momentum`` module).
+        Pass when peer set is available so peer-comparison signals fire.
 
     Returns
     -------
     QualityScore
-        Composite plus the underlying Piotroski / Altman / dividend
-        components and their per-signal breakdowns.
+        Composite plus the underlying Piotroski / Altman / dividend /
+        momentum components and their per-signal breakdowns.
     """
     f, fbreak = piotroski_score(b)
     z = altman_z_em(b)
     dq, dqbreak = dividend_quality(b)
 
     # Normalise to 0-100. Rough calibration that maps "average firm" → ~50.
-    f_norm = (f / 9.0) * 35
+    f_norm = (f / 9.0) * 30
     if not np.isfinite(z):
-        z_norm = 15
+        z_norm = 12.5  # mid-point of the 25 pp band
     else:
-        z_norm = float(np.clip((z - 1.1) / (2.6 - 1.1), 0, 1) * 30)
-    dq_norm = (dq / 10.0) * 35
+        z_norm = float(np.clip((z - 1.1) / (2.6 - 1.1), 0, 1) * 25)
+    dq_norm = (dq / 10.0) * 25
 
-    composite = float(np.clip(f_norm + z_norm + dq_norm, 0, 100))
+    if momentum is not None:
+        m_score = momentum.score
+        m_norm = (m_score / 10.0) * 20
+    else:
+        m_score = 0
+        m_norm = 10.0  # mid-point — abstain rather than penalise
+
+    composite = float(np.clip(f_norm + z_norm + dq_norm + m_norm, 0, 100))
 
     return QualityScore(
         piotroski_f=f,
         altman_z=z,
         dividend_quality=dq,
+        earnings_momentum=m_score,
+        momentum_detail=momentum,
         composite=composite,
         breakdown={
             "piotroski_components": fbreak,
             "altman_z_value": z,
             "dividend_components": dqbreak,
+            "momentum_components": momentum.breakdown if momentum is not None else "—",
         },
     )

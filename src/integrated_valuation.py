@@ -52,6 +52,7 @@ from src.cost_of_equity import CostOfEquity, cost_of_equity
 from src.data_fetcher import StockBundle, fetch_stock
 from src.data_validation import DataQualityReport, validate_bundle
 from src.ddm_models import IntrinsicValue, select_and_value
+from src.earnings_momentum import EarningsMomentum, earnings_momentum
 from src.exceptions import InvalidInputError
 from src.logging_setup import get_logger
 from src.peer_identification import PeerSet, find_peers
@@ -80,6 +81,7 @@ class ValuationResult:
     peer_set: PeerSet
     quality: QualityScore
     data_quality: DataQualityReport
+    momentum: EarningsMomentum
 
     weight_ddm: float
     weight_relative: float
@@ -119,6 +121,7 @@ class ValuationResult:
             f"  Recommendation             : {self.recommendation}  {rec_color}  "
             f"(confidence: {self.confidence})",
             f"  {self.reverse_dcf.summary()}",
+            f"  {self.momentum.summary()}",
             "=" * 78,
         ]
         if self.notes:
@@ -416,12 +419,19 @@ def value_stock(
                  len(peers.peers), peers.method, rel.weighted_value)
 
     # ------------------------------------------------------------------
-    # 5. Quality score
+    # 5. Earnings momentum overlay (peers needed for the comparison signals)
     # ------------------------------------------------------------------
-    q = quality_score(target)
+    momentum = earnings_momentum(target, peers)
     if verbose:
-        log.info("  quality=%.1f/100 (F=%d/9, DQ=%d/10)",
-                 q.composite, q.piotroski_f, q.dividend_quality)
+        log.info("  %s", momentum.summary())
+
+    # ------------------------------------------------------------------
+    # 6. Quality score (now includes momentum as the 4th pillar)
+    # ------------------------------------------------------------------
+    q = quality_score(target, momentum=momentum)
+    if verbose:
+        log.info("  quality=%.1f/100 (F=%d/9, DQ=%d/10, M=%d/10)",
+                 q.composite, q.piotroski_f, q.dividend_quality, q.earnings_momentum)
 
     # ------------------------------------------------------------------
     # 6. Blend
@@ -487,6 +497,7 @@ def value_stock(
         peer_set=peers,
         quality=q,
         data_quality=data_q,
+        momentum=momentum,
         weight_ddm=w_ddm,
         weight_relative=w_rel,
         blended_value=float(blended),

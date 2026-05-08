@@ -190,6 +190,11 @@ class StockBundle:
     payout_ratio: float                         # DPS / EPS, TTM (capped at 1.0)
     roe: float
     enterprise_value: float
+    # Quarterly statement series (oldest → newest, ~4-8 quarters). Default
+    # to empty so older cached pickles unpickle cleanly and synthetic test
+    # bundles don't need to construct them.
+    quarterly_earnings: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+    quarterly_revenue: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
     fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     source: str = "yfinance"                    # which provider supplied this
     quality_score: Optional[float] = None       # populated by validate_bundle()
@@ -457,6 +462,7 @@ def _fetch_from_yahoo(ticker: str, sector: Optional[str]) -> StockBundle:
 
         income_stmt = _safe_statement(yticker, "income_stmt")
         balance_sheet = _safe_statement(yticker, "balance_sheet")
+        quarterly_income_stmt = _safe_statement(yticker, "quarterly_income_stmt")
         dividends = yticker.dividends if hasattr(yticker, "dividends") else pd.Series(dtype=float)
 
     if _looks_empty(info, hist):
@@ -494,6 +500,12 @@ def _fetch_from_yahoo(ticker: str, sector: Optional[str]) -> StockBundle:
     # ----- Multi-year fundamentals -----
     earnings_annual = _annual_series(income_stmt, "Net Income", "Net Income Common Stockholders")
     revenue_annual = _annual_series(income_stmt, "Total Revenue", "Operating Revenue")
+    # Quarterly series for earnings-momentum overlay. yfinance's quarterly
+    # statements typically expose 4-8 trailing quarters; we use the same
+    # _annual_series helper because the row labels are identical — only
+    # the column cadence differs.
+    quarterly_earnings = _annual_series(quarterly_income_stmt, "Net Income", "Net Income Common Stockholders")
+    quarterly_revenue = _annual_series(quarterly_income_stmt, "Total Revenue", "Operating Revenue")
     book_equity_annual = _annual_series(balance_sheet, "Stockholders Equity", "Total Equity Gross Minority Interest")
     total_debt_series = _annual_series(balance_sheet, "Total Debt", "Long Term Debt")
     cash_series = _annual_series(balance_sheet, "Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments")
@@ -645,6 +657,8 @@ def _fetch_from_yahoo(ticker: str, sector: Optional[str]) -> StockBundle:
         payout_ratio=payout_ratio,
         roe=roe if np.isfinite(roe) else np.nan,
         enterprise_value=enterprise_value,
+        quarterly_earnings=quarterly_earnings,
+        quarterly_revenue=quarterly_revenue,
         source="yfinance",
     )
 
