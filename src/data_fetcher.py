@@ -33,7 +33,7 @@ import pickle
 import time
 import warnings
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -54,6 +54,89 @@ from src.exceptions import (
     TickerNotFoundError,
 )
 from src.logging_setup import get_logger
+
+
+# yfinance reports its own sector/industry taxonomy. Map it to ours so
+# custom tickers (anything not in DEFAULT_UNIVERSE) still get a sensible
+# peer pool instead of falling through to "Diversified" with no peers.
+_YF_SECTOR_TO_OURS = {
+    "Technology": "Information Technology",
+    "Healthcare": "Pharma",
+    "Consumer Defensive": "FMCG",
+    "Communication Services": "Telecom",
+    "Energy": "Oil & Gas",
+    "Real Estate": "Real Estate",
+    "Utilities": "Power",
+    "Industrials": "Capital Goods",
+    "Consumer Cyclical": "Consumer Durables",
+    "Basic Materials": "Metals",
+    "Financial Services": "Banking",
+}
+
+# Industry-level refinements take precedence over the broad sector map.
+_YF_INDUSTRY_TO_OURS = {
+    "auto manufacturers": "Auto",
+    "auto parts": "Auto",
+    "specialty chemicals": "Chemicals",
+    "chemicals": "Chemicals",
+    "agricultural inputs": "Chemicals",
+    "building materials": "Cement",
+    "cement": "Cement",
+    "asset management": "NBFC",
+    "credit services": "NBFC",
+    "insurance - life": "NBFC",
+    "insurance - diversified": "NBFC",
+    "insurance - property & casualty": "NBFC",
+    "capital markets": "NBFC",
+    "financial conglomerates": "NBFC",
+    "steel": "Metals",
+    "aluminum": "Metals",
+    "copper": "Metals",
+    "other industrial metals & mining": "Metals",
+    "coking coal": "Metals",
+    "thermal coal": "Metals",
+    "oil & gas integrated": "Oil & Gas",
+    "oil & gas refining & marketing": "Oil & Gas",
+    "oil & gas e&p": "Oil & Gas",
+    "drug manufacturers - general": "Pharma",
+    "drug manufacturers - specialty & generic": "Pharma",
+    "pharmaceutical retailers": "Pharma",
+    "biotechnology": "Pharma",
+    "engineering & construction": "Capital Goods",
+    "infrastructure operations": "Capital Goods",
+    "specialty industrial machinery": "Capital Goods",
+    "electrical equipment & parts": "Capital Goods",
+    "real estate services": "Real Estate",
+    "real estate - development": "Real Estate",
+    "telecom services": "Telecom",
+    "utilities - regulated electric": "Power",
+    "utilities - independent power producers": "Power",
+    "utilities - renewable": "Power",
+    "household & personal products": "FMCG",
+    "packaged foods": "FMCG",
+    "tobacco": "FMCG",
+    "beverages - non-alcoholic": "FMCG",
+    "beverages - brewers": "FMCG",
+    "consumer electronics": "Consumer Durables",
+    "furnishings, fixtures & appliances": "Consumer Durables",
+    "luxury goods": "Consumer Durables",
+    # New-age listed internet platforms. yfinance lumps Zomato/Eternal,
+    # Swiggy and Nykaa under "Consumer Cyclical / Internet Retail" — the
+    # default sector route would put them with TITAN / HAVELLS / VOLTAS,
+    # which has no economic basis. Override at the industry level so any
+    # uncurated Internet Retail ticker still gets the right peer pool.
+    "internet retail": "Internet & Platform",
+    "internet content & information": "Internet & Platform",
+}
+
+
+def _infer_sector(info: dict) -> str:
+    """Map yfinance's sector/industry to the project's sector taxonomy."""
+    industry = (info.get("industry") or "").strip().lower()
+    if industry and industry in _YF_INDUSTRY_TO_OURS:
+        return _YF_INDUSTRY_TO_OURS[industry]
+    yf_sector = (info.get("sector") or "").strip()
+    return _YF_SECTOR_TO_OURS.get(yf_sector, "Diversified")
 
 log = get_logger(__name__)
 
@@ -107,7 +190,7 @@ class StockBundle:
     payout_ratio: float                         # DPS / EPS, TTM
     roe: float
     enterprise_value: float
-    fetched_at: datetime = field(default_factory=datetime.utcnow)
+    fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     source: str = "yfinance"                    # which provider supplied this
     quality_score: Optional[float] = None       # populated by validate_bundle()
 
@@ -139,7 +222,11 @@ def _load_from_cache(
         return None
     try:
         bundle: StockBundle = pickle.loads(p.read_bytes())
-        if ttl is not None and datetime.utcnow() - bundle.fetched_at > ttl:
+        # Old caches were pickled with naive UTC timestamps; upgrade in-place
+        # so age math works against the tz-aware "now".
+        if bundle.fetched_at.tzinfo is None:
+            bundle.fetched_at = bundle.fetched_at.replace(tzinfo=timezone.utc)
+        if ttl is not None and datetime.now(timezone.utc) - bundle.fetched_at > ttl:
             return None
         return bundle
     except Exception as exc:
@@ -153,6 +240,21 @@ def _save_to_cache(bundle: StockBundle) -> None:
         _cache_path(bundle.ticker).write_bytes(pickle.dumps(bundle))
     except OSError as exc:
         log.warning("cache: failed to persist %s (%s)", bundle.ticker, exc)
+
+
+def _reapply_curated_sector(bundle: StockBundle, override_sector: Optional[str]) -> None:
+    """If the curated universe (or an explicit caller override) disagrees
+    with the sector baked into a cached bundle, prefer the curated value.
+
+    Without this, edits to ``DEFAULT_UNIVERSE`` (e.g. moving SWIGGY from
+    "Consumer Durables" to "Internet & Platform") wouldn't take effect
+    until every cached pickle was manually invalidated.
+    """
+    desired = override_sector or DEFAULT_UNIVERSE.get(bundle.ticker)
+    if desired and desired != bundle.sector:
+        log.info("sector: reclassifying %s in cache (%s → %s)",
+                 bundle.ticker, bundle.sector, desired)
+        bundle.sector = desired
 
 
 # ---------------------------------------------------------------------------
@@ -237,13 +339,16 @@ def fetch_stock(
         from src.exceptions import InvalidInputError
         raise InvalidInputError("ticker must be a non-empty string")
 
-    sector = sector or DEFAULT_UNIVERSE.get(ticker, "Diversified")
+    # Resolve sector. Order: explicit override → curated universe → yfinance
+    # auto-inference (handled inside _fetch_from_yahoo, which has info).
+    sector = sector or DEFAULT_UNIVERSE.get(ticker)
 
     # --- 1. Fresh cache ----------------------------------------------------
     if not force_refresh:
         cached = _load_from_cache(ticker, ttl=ttl)
         if cached is not None:
             log.debug("cache: hit (fresh) for %s", ticker)
+            _reapply_curated_sector(cached, sector)
             if validate and cached.quality_score is None:
                 _attach_quality(cached)
             return cached
@@ -253,7 +358,8 @@ def fetch_stock(
         stale = _load_from_cache(ticker, ttl=None)
         if stale is not None:
             log.info("offline: serving stale cache for %s (age=%s)",
-                     ticker, datetime.utcnow() - stale.fetched_at)
+                     ticker, datetime.now(timezone.utc) - stale.fetched_at)
+            _reapply_curated_sector(stale, sector)
             if validate and stale.quality_score is None:
                 _attach_quality(stale)
             return stale
@@ -271,7 +377,7 @@ def fetch_stock(
         stale = _load_from_cache(ticker, ttl=None)
         if stale is not None:
             log.info("yahoo: served stale cache (age=%s) after live failure",
-                     datetime.utcnow() - stale.fetched_at)
+                     datetime.now(timezone.utc) - stale.fetched_at)
             if validate and stale.quality_score is None:
                 _attach_quality(stale)
             return stale
@@ -307,7 +413,7 @@ def _looks_empty(info: dict, hist: pd.DataFrame) -> bool:
     return no_info and (hist is None or hist.empty)
 
 
-def _fetch_from_yahoo(ticker: str, sector: str) -> StockBundle:
+def _fetch_from_yahoo(ticker: str, sector: Optional[str]) -> StockBundle:
     """The actual network call. Wrapped because it's the bit that fails.
 
     yfinance is famously flaky — empty `info` dicts, missing schema fields,
@@ -349,6 +455,18 @@ def _fetch_from_yahoo(ticker: str, sector: str) -> StockBundle:
         )
 
     name = info.get("longName") or info.get("shortName") or ticker
+
+    # Sector resolution: caller wins, then yfinance auto-inference, then
+    # "Diversified" as last resort. This is what lets a custom ticker
+    # like HGINFRA.NS land in "Capital Goods" (its real peer pool)
+    # rather than the empty "Diversified" bucket.
+    if not sector:
+        sector = _infer_sector(info)
+        if sector != "Diversified":
+            log.info("sector: inferred '%s' for %s from yfinance "
+                     "(sector=%s, industry=%s)",
+                     sector, ticker, info.get("sector"), info.get("industry"))
+
     price = _safe_float(info.get("currentPrice")) or _safe_float(info.get("regularMarketPrice"))
     if not np.isfinite(price) and not hist.empty:
         price = float(hist["Close"].iloc[-1])
@@ -391,8 +509,6 @@ def _fetch_from_yahoo(ticker: str, sector: str) -> StockBundle:
     if not np.isfinite(revenue) and not revenue_annual.empty:
         revenue = float(revenue_annual.iloc[-1])
 
-    sales_per_share = revenue / shares if (np.isfinite(revenue) and np.isfinite(shares) and shares > 0) else np.nan
-
     fcf = _safe_float(info.get("freeCashflow"))
     fcf_per_share = fcf / shares if (np.isfinite(fcf) and np.isfinite(shares) and shares > 0) else np.nan
 
@@ -411,6 +527,37 @@ def _fetch_from_yahoo(ticker: str, sector: str) -> StockBundle:
     net_income = _safe_float(info.get("netIncomeToCommon"))
     if not np.isfinite(net_income) and not earnings_annual.empty:
         net_income = float(earnings_annual.iloc[-1])
+
+    # Sanity: yfinance occasionally returns IT-exporter revenue/EBITDA in
+    # USD (HCL, Infosys) even though price/EPS/market-cap are in INR — this
+    # makes net_income exceed revenue, which is mathematically impossible.
+    # When that happens, fall back to the local annual statement, which is
+    # consistently currency-aligned with EPS.
+    if (
+        np.isfinite(revenue) and np.isfinite(net_income)
+        and revenue > 0 and net_income > 0
+        and revenue < net_income
+        and not revenue_annual.empty
+    ):
+        local_rev = float(revenue_annual.iloc[-1])
+        if local_rev >= net_income:
+            log.info("revenue: yfinance.totalRevenue (%.2e) below net income; "
+                     "falling back to annual statement (%.2e) for %s",
+                     revenue, local_rev, ticker)
+            revenue = local_rev
+        else:
+            revenue = float("nan")
+    if (
+        np.isfinite(ebitda) and np.isfinite(net_income)
+        and ebitda > 0 and net_income > 0
+        and ebitda < net_income
+    ):
+        # EBITDA must be ≥ net income (it's pre-tax, pre-interest, pre-D&A).
+        log.info("ebitda: yfinance value (%.2e) below net income; treating as unavailable for %s",
+                 ebitda, ticker)
+        ebitda = float("nan")
+
+    sales_per_share = revenue / shares if (np.isfinite(revenue) and np.isfinite(shares) and shares > 0) else np.nan
 
     total_debt = _safe_float(info.get("totalDebt"))
     if not np.isfinite(total_debt) and not total_debt_series.empty:

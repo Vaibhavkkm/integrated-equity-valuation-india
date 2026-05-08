@@ -120,7 +120,33 @@ def two_stage_ddm(
     ke: float,
     n_years: int = SETTINGS.high_growth_years,
 ) -> IntrinsicValue:
-    """Two-stage DDM with a sharp transition at year `n_years`."""
+    """Two-stage DDM with a sharp transition at year ``n_years``.
+
+    Discounts an explicit forecast of dividends growing at ``g_high`` for
+    ``n_years`` and tacks on a Gordon perpetuity at ``g_terminal``.
+
+    Parameters
+    ----------
+    d0 : float
+        Last actual dividend per share (TTM).
+    g_high : float
+        Growth rate during the explicit forecast horizon (decimal, e.g. 0.12).
+    g_terminal : float
+        Perpetual growth rate after year ``n_years``. Must satisfy
+        ``g_terminal < ke``; the helper ``_cap_terminal_growth`` enforces this.
+    ke : float
+        Cost of equity (decimal).
+    n_years : int, optional
+        Length of the explicit high-growth phase. Defaults to
+        ``SETTINGS.high_growth_years``.
+
+    Returns
+    -------
+    IntrinsicValue
+        ``valid=False`` (with NaN value) if the firm pays no dividend;
+        otherwise the per-share intrinsic value plus an ``inputs`` dict that
+        records the PV split between explicit dividends and terminal value.
+    """
     g_terminal = _cap_terminal_growth(g_terminal, ke)
     note = _check_growth_below_discount(g_terminal, ke, "Two-Stage terminal")
 
@@ -167,13 +193,34 @@ def h_model(
     ke: float,
     half_life_years: float = SETTINGS.transition_years,
 ) -> IntrinsicValue:
-    """H-Model closed form:
+    """H-Model closed form (Fuller & Hsia, 1984).
 
         V = [D0 * (1 + g_L) + D0 * H * (g_S − g_L)] / (Ke − g_L)
 
     where H = half_life_years / 2, g_S is the initial high growth rate, and
     g_L is the terminal growth rate. Growth declines linearly from g_S to
-    g_L over `2H` years, eliminating the cliff in the two-stage model.
+    g_L over ``2H`` years, eliminating the cliff in the two-stage model.
+
+    Parameters
+    ----------
+    d0 : float
+        Last actual dividend per share (TTM).
+    g_high : float
+        Initial (high) growth rate ``g_S`` at year 0.
+    g_terminal : float
+        Long-run growth rate ``g_L`` reached after the linear fade. Capped
+        below ``ke`` upstream.
+    ke : float
+        Cost of equity (decimal).
+    half_life_years : float, optional
+        Number of years over which growth decays from ``g_S`` to ``g_L``.
+        ``H`` is half this value. Defaults to ``SETTINGS.transition_years``.
+
+    Returns
+    -------
+    IntrinsicValue
+        ``valid=False`` for non-payers; otherwise the closed-form per-share
+        intrinsic value with the implied ``H`` reported in ``inputs``.
     """
     g_terminal = _cap_terminal_growth(g_terminal, ke)
     note = _check_growth_below_discount(g_terminal, ke, "H-Model terminal")
@@ -213,7 +260,34 @@ def three_stage_ddm(
     high_years: int = SETTINGS.high_growth_years,
     fade_years: int = SETTINGS.transition_years,
 ) -> IntrinsicValue:
-    """Three-stage DDM with a linear fade from g_high to g_terminal."""
+    """Three-stage DDM with a linear fade from ``g_high`` to ``g_terminal``.
+
+    Stage 1 grows dividends at ``g_high`` for ``high_years``; stage 2 fades
+    growth linearly across ``fade_years`` to the terminal rate; stage 3 is a
+    Gordon perpetuity discounted back from the end of stage 2.
+
+    Parameters
+    ----------
+    d0 : float
+        Last actual dividend per share (TTM).
+    g_high : float
+        Stage-1 growth rate (decimal).
+    g_terminal : float
+        Stage-3 perpetual growth rate. Capped below ``ke`` upstream.
+    ke : float
+        Cost of equity (decimal).
+    high_years : int, optional
+        Length of stage 1. Defaults to ``SETTINGS.high_growth_years``.
+    fade_years : int, optional
+        Length of the linear-fade stage 2. Defaults to
+        ``SETTINGS.transition_years``.
+
+    Returns
+    -------
+    IntrinsicValue
+        ``valid=False`` for non-payers; otherwise the per-share intrinsic
+        value, with ``inputs`` recording each stage's PV contribution.
+    """
     g_terminal = _cap_terminal_growth(g_terminal, ke)
     note = _check_growth_below_discount(g_terminal, ke, "Three-Stage terminal")
 
@@ -270,7 +344,22 @@ def historical_dividend_cagr(dps_series: pd.Series, fallback: float = 0.05) -> f
 
     Why trim? Indian companies sometimes pay one-off special dividends
     (think: Coal India 2021), which make a naive CAGR explode. We drop the
-    top and bottom value before computing growth.
+    top and bottom value before computing growth, then re-sort by date
+    so the geometric-mean math is anchored to the chronological endpoints.
+
+    Parameters
+    ----------
+    dps_series : pd.Series
+        Annual dividends per share, indexed by year. Order is restored
+        chronologically internally — the caller may pass either direction.
+    fallback : float, optional
+        Returned when the series is too thin (< 3 paying years) or starts
+        from zero. Defaults to 5% — the project's long-run prior.
+
+    Returns
+    -------
+    float
+        Annualised dividend growth rate, clipped to ``[-5%, 30%]``.
     """
     s = dps_series.dropna()
     s = s[s > 0]
@@ -291,7 +380,22 @@ def historical_dividend_cagr(dps_series: pd.Series, fallback: float = 0.05) -> f
 
 
 def sustainable_growth_rate(roe: float, payout_ratio: float) -> float:
-    """g = ROE * retention ratio. Classic dividend-irrelevance algebra."""
+    """``g = ROE * retention``. Classic dividend-irrelevance algebra.
+
+    Parameters
+    ----------
+    roe : float
+        Return on equity (decimal).
+    payout_ratio : float
+        Dividend / earnings (decimal). Retention ``= 1 - payout``,
+        floored at 0 so over-distribution does not feed a negative
+        sustainable growth.
+
+    Returns
+    -------
+    float
+        Sustainable growth rate, clipped to ``[-2%, 30%]``.
+    """
     retention = max(0.0, 1.0 - payout_ratio)
     return float(np.clip(roe * retention, -0.02, 0.30))
 
@@ -367,6 +471,40 @@ def select_and_value(
       * Young / fast-growing payer (high g, payout < 40%) → H-Model so
         the growth fade is smooth.
       * Everything in between → Three-Stage DDM.
+
+    Parameters
+    ----------
+    eps_ttm : float
+        Trailing twelve-month earnings per share. Used only to detect
+        token-dividend payers that should be treated as non-payers.
+    dps_ttm : float
+        Trailing twelve-month dividend per share. Zero or negative routes to
+        the non-payer branch.
+    payout_ratio : float
+        Dividend / earnings, capped at 1.0 upstream. Drives both the
+        sustainable-growth estimate and the variant-selection rules.
+    roe : float
+        Return on equity (decimal). Combined with retention to derive the
+        sustainable growth rate ``g = ROE * (1 - payout)``.
+    ke : float
+        Cost of equity (decimal) — the discount rate for every variant.
+    historical_dps : pd.Series
+        Annual dividends per share, oldest → newest. Length governs the
+        Bayesian shrinkage strength applied to the historical CAGR.
+    historical_eps : pd.Series
+        Annual earnings per share. Currently passed through for downstream
+        consistency checks; not used in the closed-form valuation.
+    sector_g_terminal : float, optional
+        Sector-specific terminal growth override. Falls back to 4.5% — the
+        long-run Indian nominal-growth-minus-inflation default.
+
+    Returns
+    -------
+    IntrinsicValue
+        For payers, the variant chosen plus the per-share intrinsic value.
+        For non-payers (or token payers below 5% payout), an
+        ``valid=False`` placeholder so the integrated pipeline can defer to
+        relative valuation cleanly.
     """
     if dps_ttm <= 0:
         return IntrinsicValue(
@@ -377,6 +515,28 @@ def select_and_value(
             note=(
                 "Stock pays no dividend; DDM is not applicable. "
                 "Valuation will rely on the relative-valuation track."
+            ),
+        )
+
+    # Near-non-payer guard: a firm earning ₹60/share but paying ₹2/share
+    # (HGINFRA-style infra/EPC reinvestors) has a 3% payout. DDM only
+    # prices the dividend stream, so it values the ₹2 and ignores the
+    # ₹58 being reinvested at ROE — yielding an intrinsic value an
+    # order of magnitude below any defensible figure. Treat as a
+    # non-payer and let relative valuation carry the call.
+    if (
+        np.isfinite(eps_ttm) and eps_ttm > 0
+        and np.isfinite(payout_ratio) and 0 < payout_ratio < 0.05
+    ):
+        return IntrinsicValue(
+            value_per_share=float("nan"),
+            model="DDM (skipped)",
+            inputs=dict(reason="Near-non-payer", payout_ratio=payout_ratio),
+            valid=False,
+            note=(
+                f"Token dividend (payout={payout_ratio:.1%}) — firm retains "
+                "~all earnings, so DDM cannot capture the reinvested cash "
+                "flow. Valuation defers to the relative-valuation track."
             ),
         )
 

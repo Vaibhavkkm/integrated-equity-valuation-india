@@ -111,6 +111,21 @@ def _mahalanobis(X: np.ndarray, target_row: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+def _within_size_band(target: StockBundle, peer: StockBundle, band: float) -> bool:
+    """Reject peers whose market cap is outside [target / band, target × band].
+
+    Large-cap multiples don't apply to small-caps and vice versa: the
+    market discounts small-caps for liquidity, governance, and scale.
+    Without this filter, an orphan small-cap (HGINFRA against LT/ABB)
+    inherits big-cap multiples and the relative valuation explodes.
+    """
+    if not (np.isfinite(target.market_cap) and target.market_cap > 0):
+        return True  # Can't enforce; let it through.
+    if not (np.isfinite(peer.market_cap) and peer.market_cap > 0):
+        return False
+    return target.market_cap / band <= peer.market_cap <= target.market_cap * band
+
+
 def find_peers(
     target: StockBundle,
     universe: Optional[dict] = None,
@@ -119,30 +134,76 @@ def find_peers(
     min_peers: int = SETTINGS.min_peers,
     max_peers: int = SETTINGS.max_peers,
     offline: bool = False,
+    size_band: float = 5.0,
 ) -> PeerSet:
-    """Build a clustering-based peer set for `target`."""
+    """Build a clustering-based peer set for ``target``.
+
+    Same-sector candidates are filtered to a market-cap band, fed into
+    K-Means on a normalised feature matrix, and the target's cluster-mates
+    are ranked by Mahalanobis distance to pick the closest peers. The size
+    band auto-widens (5x → 10x → 20x) when a sector has few in-band names.
+
+    Parameters
+    ----------
+    target : StockBundle
+        The stock being valued. Sector and market cap drive the candidate
+        filter; the full feature vector (ROE, D/E, payout, growth, margin)
+        anchors the Mahalanobis ranking.
+    universe : dict, optional
+        Ticker → sector mapping. Defaults to ``config.DEFAULT_UNIVERSE``.
+    n_clusters : int, optional
+        K for the K-Means partition over the same-sector pool.
+    min_peers, max_peers : int, optional
+        Acceptable peer-count band for the final result. Below ``min_peers``
+        the function returns an empty peer set so the relative-valuation
+        track is flagged unavailable rather than reporting noise.
+    offline : bool, optional
+        If True, do not hit yfinance — read peer bundles from disk only.
+    size_band : float, optional
+        Initial market-cap multiple bracketing the target (default 5x).
+        Auto-widens to 10x and 20x when fewer than ``min_peers`` survive.
+
+    Returns
+    -------
+    PeerSet
+        Container carrying the resolved peers, the selection method
+        (cluster id, band used, fallback note), and the debug feature
+        matrix that the dashboard renders for transparency.
+    """
     universe = universe or DEFAULT_UNIVERSE
     same_sector_tickers = [
         t for t, s in universe.items()
         if s == target.sector and t != target.ticker
     ]
 
-    # Edge case: tiny sector — fall back to all same-sector firms.
-    if len(same_sector_tickers) <= min_peers:
-        peers = _safe_fetch_many(same_sector_tickers, offline=offline)
-        return PeerSet(
-            target=target,
-            peers=peers,
-            method=f"sector-only ({target.sector}; only {len(peers)} candidates)",
-        )
+    # Fetch the same-sector candidate pool, then drop peers outside the
+    # size band so a small-cap target doesn't get valued at large-cap
+    # multiples (or vice versa). Widen progressively; if we still can't
+    # hit min_peers we return an empty peer set, which forces the engine
+    # to fall back to N/A rather than print an inflated relative value.
+    pool_raw = _safe_fetch_many(same_sector_tickers, offline=offline)
+    pool: List[StockBundle] = []
+    band_used = size_band
+    for band in (size_band, size_band * 2, size_band * 4):
+        pool = [p for p in pool_raw if _within_size_band(target, p, band)]
+        band_used = band
+        if len(pool) >= min_peers:
+            if band > size_band:
+                log.info("peers: widened size band to %.0fx for %s "
+                         "(only %d in-band peers at %.0fx)",
+                         band, target.ticker, len(pool), size_band)
+            break
 
-    # Fetch candidate pool
-    pool = _safe_fetch_many(same_sector_tickers, offline=offline)
     if len(pool) < min_peers:
         return PeerSet(
             target=target,
             peers=pool,
-            method=f"sector-only fallback ({len(pool)} fetched)",
+            method=(
+                f"insufficient size-matched peers — "
+                f"{len(pool)} of {len(pool_raw)} candidates remain after "
+                f"{band_used:.0f}x size filter; "
+                "relative valuation will be flagged unavailable."
+            ),
         )
 
     # Build feature matrix including target

@@ -13,7 +13,7 @@ The output is a 4-5 page equity research note with:
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -104,9 +104,27 @@ def _table_style(header_color=_PRIMARY) -> TableStyle:
 
 # ---------------------------------------------------------------------------
 def generate_pdf(result: "ValuationResult") -> Path:
-    """Build the PDF and return the path."""
+    """Build the PDF research note and return the on-disk path.
+
+    Lays out the cover page, executive summary, cost-of-equity workings,
+    DDM detail, peer multiples, quality scoring, Monte Carlo + tornado,
+    and disclaimer using ReportLab. The output filename is timestamped
+    (UTC) so successive runs do not overwrite each other.
+
+    Parameters
+    ----------
+    result : ValuationResult
+        Output of :func:`integrated_valuation.value_stock`. Every section
+        is rendered from this object — the function is a pure formatter
+        and never re-runs the underlying valuation.
+
+    Returns
+    -------
+    Path
+        Path to the written PDF, under ``REPORT_DIR``.
+    """
     safe = result.target.ticker.replace("&", "AND").replace("/", "_")
-    ts = datetime.utcnow().strftime("%Y%m%d_%H%M")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
     path = REPORT_DIR / f"{safe}_valuation_{ts}.pdf"
 
     doc = SimpleDocTemplate(
@@ -127,7 +145,7 @@ def generate_pdf(result: "ValuationResult") -> Path:
         s["Body"]))
     story.append(Paragraph(f"<b>Sector:</b> {result.target.sector}", s["Body"]))
     story.append(Paragraph(
-        f"<b>Report Date:</b> {datetime.utcnow().strftime('%d %B %Y')}",
+        f"<b>Report Date:</b> {datetime.now(timezone.utc).strftime('%d %B %Y')}",
         s["Body"]))
     story.append(Spacer(1, 4*cm))
 

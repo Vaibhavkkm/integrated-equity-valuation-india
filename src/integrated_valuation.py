@@ -42,7 +42,7 @@ recommendation. It folds in:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
@@ -93,7 +93,7 @@ class ValuationResult:
     reverse_dcf: ImpliedExpectations
 
     base_g_terminal: float
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     notes: list[str] = field(default_factory=list)
 
     # ------------------------------------------------------------------
@@ -142,42 +142,92 @@ def _blend_weights(
 ) -> tuple[float, float]:
     """Return (w_ddm, w_relative) summing to 1.0.
 
-    The DDM weight tilts up by up to +15 pp when:
-      * dividend track record is long & clean (DQ score ≥ 8)
-      * earnings series has 8+ years
-    and tilts down by up to −15 pp when:
-      * the firm is a non-payer (DQ score = 0)
-      * the model itself flagged invalid (no positive D0)
+    Payout ratio is the dominant signal. The DDM only prices cash
+    returned to shareholders; firms that reinvest most earnings (low
+    payout) hold the bulk of their value in growth the dividend stream
+    alone cannot capture, so the blend has to lean on the relative
+    track for them. Track-record quality is a tie-breaker on top.
     """
     if not ddm.valid:
         return 0.0, 1.0
-    if rel.weighted_value is None or not np.isfinite(rel.weighted_value):
+    if (
+        rel.weighted_value is None
+        or not np.isfinite(rel.weighted_value)
+        or rel.weighted_value <= 0
+    ):
         return 1.0, 0.0
 
     tilt = 0.0
 
-    # Dividend quality
-    dq = quality.dividend_quality
-    if dq >= 8:
+    payout = (
+        float(target.payout_ratio)
+        if (target.payout_ratio is not None and np.isfinite(target.payout_ratio))
+        else 0.0
+    )
+    if payout < 0.30:
+        tilt -= 0.30
+    elif payout < 0.50:
+        tilt -= 0.10
+    elif payout >= 0.70:
         tilt += 0.10
-    elif dq >= 5:
+
+    dq = quality.dividend_quality
+    if dq >= 8 and payout >= 0.40:
         tilt += 0.05
     elif dq <= 2:
         tilt -= 0.10
 
-    # Earnings track length
     n_eps_years = (target.earnings_annual.dropna() > 0).sum()
     if n_eps_years >= 8:
         tilt += 0.05
     elif n_eps_years <= 3:
         tilt -= 0.05
 
-    tilt = float(np.clip(tilt, -0.15, 0.15))
-    w_ddm = float(np.clip(base_w_ddm + tilt, 0.20, 0.80))
+    # DDM-vs-Relative divergence. When the two tracks disagree sharply,
+    # one of them is mis-specified for this firm; in practice it's
+    # almost always the DDM, because the dividend stream alone can't
+    # capture brand premia / growth optionality the market is paying
+    # for. Lean toward the relative track in that case.
+    ratio = ddm.value_per_share / rel.weighted_value
+    if np.isfinite(ratio) and ratio > 0:
+        if ratio < 0.40:
+            tilt -= 0.20
+        elif ratio < 0.65:
+            tilt -= 0.10
+        elif ratio > 2.50:
+            tilt -= 0.10  # the rare opposite case — Rel is suspect, but DDM
+                          # alone is also not safe; small de-emphasis.
+
+    tilt = float(np.clip(tilt, -0.45, 0.15))
+    w_ddm = float(np.clip(base_w_ddm + tilt, 0.10, 0.80))
     return w_ddm, 1 - w_ddm
 
 
-def _recommendation(margin_of_safety: float) -> str:
+def _recommendation(
+    margin_of_safety: float,
+    *,
+    ddm_valid: bool,
+    rel_valid: bool,
+    payout: float,
+) -> str:
+    """BUY / HOLD / SELL / N/A.
+
+    N/A is returned when the model can't defensibly take a position:
+
+      * MoS is non-finite (both tracks failed).
+      * Only the DDM track is valid AND the firm has low payout (<30%) —
+        DDM mechanically under-prices retainers, so calling SELL on the
+        back of an empty peer set produces nonsense like "−2000% MoS".
+      * MoS magnitude exceeds 250% — the model is well outside its
+        calibrated range, almost always a data issue rather than a
+        legitimate valuation disagreement.
+    """
+    if not np.isfinite(margin_of_safety):
+        return "N/A"
+    if not rel_valid and (not ddm_valid or payout < 0.30):
+        return "N/A"
+    if abs(margin_of_safety) > 2.5:
+        return "N/A"
     if margin_of_safety >= SETTINGS.buy_threshold:
         return "BUY"
     if margin_of_safety <= SETTINGS.sell_threshold:
@@ -380,7 +430,12 @@ def value_stock(
         blended = rel.weighted_value
 
     mos = (blended - target.price) / blended if (np.isfinite(blended) and blended > 0) else float("nan")
-    rec = _recommendation(mos) if np.isfinite(mos) else "N/A"
+    rec = _recommendation(
+        mos,
+        ddm_valid=ddm.valid,
+        rel_valid=bool(np.isfinite(rel.weighted_value)) if rel.weighted_value is not None else False,
+        payout=float(target.payout_ratio) if (target.payout_ratio is not None and np.isfinite(target.payout_ratio)) else 0.0,
+    )
 
     # ------------------------------------------------------------------
     # 7. Reverse DCF — what growth is the market pricing in?

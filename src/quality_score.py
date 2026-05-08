@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import numpy as np
-import pandas as pd
 
 from src.data_fetcher import StockBundle
 
@@ -42,6 +41,19 @@ def piotroski_score(b: StockBundle) -> tuple[int, dict]:
     The strict implementation needs Operating CFO and accruals which Yahoo
     sometimes drops. Where a check is impossible, we abstain (the firm
     neither gains nor loses the point), which is conservative.
+
+    Parameters
+    ----------
+    b : StockBundle
+        Target firm. The function reads ``net_income``,
+        ``free_cash_flow_per_share_ttm``, ``earnings_annual``,
+        ``revenue_annual``, ``total_assets``, and ``shares_outstanding``.
+
+    Returns
+    -------
+    tuple[int, dict]
+        Capped 0-9 score plus a breakdown dict mapping each signal name
+        to its individual contribution (or ``"—"`` when abstained).
     """
     breakdown: dict = {}
     score = 0
@@ -115,6 +127,19 @@ def altman_z_em(b: StockBundle) -> float:
       X4 = Book Equity / Total Liabilities
 
     Z'' > 2.6 → safe; 1.1 < Z'' < 2.6 → grey; Z'' < 1.1 → distress.
+
+    Parameters
+    ----------
+    b : StockBundle
+        Target firm. Reads ``cash``, ``total_debt``, ``equity``,
+        ``ebitda``, and ``total_assets``.
+
+    Returns
+    -------
+    float
+        Z'' score, or ``NaN`` when ``total_assets`` is missing or
+        non-positive (the score has no meaningful interpretation in
+        either case).
     """
     if not (np.isfinite(b.total_assets) and b.total_assets > 0):
         return float("nan")
@@ -132,7 +157,23 @@ def altman_z_em(b: StockBundle) -> float:
 # Dividend quality (0-10)
 # ---------------------------------------------------------------------------
 def dividend_quality(b: StockBundle) -> tuple[int, dict]:
-    """Score a payer's dividend track record."""
+    """Score a payer's dividend track record (0-10).
+
+    Combines five sub-signals: pays currently, multi-year history,
+    absence of major cuts, payout sustainability, and dividend growth.
+
+    Parameters
+    ----------
+    b : StockBundle
+        Reads ``dividend_per_share_ttm``, ``dividends_annual``, and
+        ``payout_ratio``.
+
+    Returns
+    -------
+    tuple[int, dict]
+        Capped 0-10 score plus a breakdown dict naming each sub-signal.
+        Non-payers short-circuit to ``(0, {"pays_currently": 0})``.
+    """
     breakdown: dict = {}
     score = 0
 
@@ -196,6 +237,24 @@ def dividend_quality(b: StockBundle) -> tuple[int, dict]:
 # Public composite
 # ---------------------------------------------------------------------------
 def quality_score(b: StockBundle) -> QualityScore:
+    """Composite 0-100 quality score for ``b``.
+
+    Blends Piotroski (35%), Altman Z'' (30%), and dividend quality (35%)
+    on a calibration that maps an "average firm" to roughly 50. The
+    individual sub-scores are returned alongside so the dashboard and
+    PDF report can show the full breakdown.
+
+    Parameters
+    ----------
+    b : StockBundle
+        Target firm — passed through to each sub-scorer.
+
+    Returns
+    -------
+    QualityScore
+        Composite plus the underlying Piotroski / Altman / dividend
+        components and their per-signal breakdowns.
+    """
     f, fbreak = piotroski_score(b)
     z = altman_z_em(b)
     dq, dqbreak = dividend_quality(b)

@@ -105,6 +105,7 @@ SECTOR_UNLEVERED_BETA: Dict[str, float] = {
     "Consumer Durables":        0.95,
     "Media":                    1.15,
     "Textiles":                 1.05,
+    "Internet & Platform":      1.40,
     "Diversified":              1.00,
 }
 
@@ -167,11 +168,22 @@ DEFAULT_UNIVERSE: Dict[str, str] = {
     "SHREECEM.NS": "Cement",
     "AMBUJACEM.NS": "Cement",
     "ACC.NS": "Cement",
-    # Capital Goods
+    # Capital Goods (incl. mid-cap infra / road EPC so small-cap targets
+    # like HGINFRA, KNRCON have size-matched peers within the 20x band).
     "LT.NS": "Capital Goods",
     "SIEMENS.NS": "Capital Goods",
     "ABB.NS": "Capital Goods",
     "BHEL.NS": "Capital Goods",
+    "HGINFRA.NS": "Capital Goods",
+    "KNRCON.NS": "Capital Goods",
+    "PNCINFRA.NS": "Capital Goods",
+    "GRINFRA.NS": "Capital Goods",
+    "ASHOKA.NS": "Capital Goods",
+    "NCC.NS": "Capital Goods",
+    "KEC.NS": "Capital Goods",
+    "IRB.NS": "Capital Goods",
+    "RVNL.NS": "Capital Goods",
+    "IRCON.NS": "Capital Goods",
     # Power
     "NTPC.NS": "Power",
     "POWERGRID.NS": "Power",
@@ -186,6 +198,17 @@ DEFAULT_UNIVERSE: Dict[str, str] = {
     "TITAN.NS": "Consumer Durables",
     "HAVELLS.NS": "Consumer Durables",
     "VOLTAS.NS": "Consumer Durables",
+    # Internet & Platform — new-age listings (Zomato/Eternal, Swiggy,
+    # Nykaa, Paytm, Policybazaar, IRCTC, Delhivery). Most are loss-making
+    # or thin-margin, so PE/PEG are unreliable; the relative-valuation
+    # weights (see SECTOR_OVERRIDES) lean on P/S and EV/EBITDA instead.
+    "ETERNAL.NS": "Internet & Platform",
+    "SWIGGY.NS": "Internet & Platform",
+    "NYKAA.NS": "Internet & Platform",
+    "PAYTM.NS": "Internet & Platform",
+    "POLICYBZR.NS": "Internet & Platform",
+    "IRCTC.NS": "Internet & Platform",
+    "DELHIVERY.NS": "Internet & Platform",
 }
 
 
@@ -195,7 +218,10 @@ INDIA_DEFAULT_SPREAD: float = 0.0210
 
 # Reporting metadata
 PROJECT_TITLE = "Integrated Equity Valuation of Indian Stocks"
-PROJECT_SUBTITLE = "Dividend Discount Model & Relative Valuation — A 50/50 Blend"
+PROJECT_SUBTITLE = (
+    "Dividend Discount Model + Relative Valuation, credibility-weighted "
+    "(50/50 default for dividend payers; tilts toward Relative for low-payout firms)"
+)
 AUTHOR_NAME = "Vaibhav Mangroliya"
 SUPERVISOR_NAME = "Mr. Senthil Nagarajan"
 INSTITUTION = "Student Project — Semester IV"

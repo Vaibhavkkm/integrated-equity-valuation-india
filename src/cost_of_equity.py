@@ -81,7 +81,26 @@ def estimate_beta_from_prices(
     stock_prices: pd.Series,
     market_prices: pd.Series,
 ) -> Optional[float]:
-    """OLS slope of weekly log returns: stock vs market."""
+    """OLS slope of weekly log returns: stock vs market.
+
+    Resamples to weekly Friday closes to dampen microstructure noise,
+    aligns the series, then divides ``cov(rs, rm) / var(rm)``. Returns
+    ``None`` when fewer than ~14 months of overlapping weekly bars are
+    available, which is the project's reliability floor.
+
+    Parameters
+    ----------
+    stock_prices : pd.Series
+        Daily closes for the stock, indexed by trading date.
+    market_prices : pd.Series
+        Daily closes for the market index (Nifty 50 by convention).
+
+    Returns
+    -------
+    float or None
+        Estimated raw beta, or ``None`` when the series are too short or
+        the market variance is non-positive.
+    """
     if stock_prices is None or market_prices is None:
         return None
     if stock_prices.empty or market_prices.empty:
@@ -120,7 +139,27 @@ def relever_sector_beta(
     debt_to_equity: float,
     tax_rate: float = EFFECTIVE_TAX_RATE_IN,
 ) -> float:
-    """Hamada equation: β_levered = β_unlevered * [1 + (1 − t) * D/E]."""
+    """Hamada equation: β_levered = β_unlevered * [1 + (1 − t) * D/E].
+
+    Used as a fallback when own-beta estimation fails (thin trading
+    history, recent IPO, etc.).
+
+    Parameters
+    ----------
+    sector : str
+        Sector key looked up in ``SECTOR_UNLEVERED_BETA``. Unknown sectors
+        fall back to a 1.0 unlevered beta (market-equivalent risk).
+    debt_to_equity : float
+        Debt / equity ratio. Negative values are clamped to zero before
+        the levering step.
+    tax_rate : float, optional
+        Effective tax rate. Defaults to ``EFFECTIVE_TAX_RATE_IN``.
+
+    Returns
+    -------
+    float
+        Levered (raw) beta, prior to Bloomberg adjustment.
+    """
     bu = SECTOR_UNLEVERED_BETA.get(sector, 1.0)
     return float(bu * (1 + (1 - tax_rate) * max(0.0, debt_to_equity)))
 
@@ -229,7 +268,29 @@ def wacc(
     pre_tax_kd: float = 0.085,
     tax_rate: float = EFFECTIVE_TAX_RATE_IN,
 ) -> float:
-    """Standard WACC with Indian default tax rate."""
+    """Standard WACC with Indian default tax rate.
+
+    Parameters
+    ----------
+    ke : float
+        Cost of equity (decimal).
+    market_cap : float
+        Equity value (₹).
+    total_debt : float
+        Gross interest-bearing debt (₹).
+    pre_tax_kd : float, optional
+        Pre-tax cost of debt. Defaults to 8.5% — a reasonable AAA-rated
+        Indian corporate bond yield in the project's reference period.
+    tax_rate : float, optional
+        Effective tax rate used to compute the after-tax cost of debt.
+        Defaults to ``EFFECTIVE_TAX_RATE_IN``.
+
+    Returns
+    -------
+    float
+        Weighted-average cost of capital. Returns ``ke`` when the
+        capital base ``market_cap + total_debt`` is non-positive.
+    """
     v = market_cap + total_debt
     if v <= 0:
         return ke

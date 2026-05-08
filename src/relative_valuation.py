@@ -25,7 +25,7 @@ EV/EBITDA carries 0%.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -55,6 +55,10 @@ SECTOR_OVERRIDES: Dict[str, Dict[str, float]] = {
     "Real Estate": {"PE": 0.20, "PB": 0.40, "PS": 0.10, "EV_EBITDA": 0.20, "PEG": 0.10},
     "FMCG":    {"PE": 0.40, "PB": 0.10, "PS": 0.10, "EV_EBITDA": 0.30, "PEG": 0.10},
     "Information Technology": {"PE": 0.45, "PB": 0.05, "PS": 0.15, "EV_EBITDA": 0.25, "PEG": 0.10},
+    # Loss-making or thin-margin platforms; PE/PEG are unreliable, so
+    # the weight sits on revenue scale (P/S) and operating cash run-rate
+    # (EV/EBITDA). P/B carries a small slice for the asset-lighter names.
+    "Internet & Platform": {"PE": 0.10, "PB": 0.10, "PS": 0.45, "EV_EBITDA": 0.30, "PEG": 0.05},
 }
 
 
@@ -81,6 +85,42 @@ class RelativeValuation:
 # ---------------------------------------------------------------------------
 # Multiple computation per peer
 # ---------------------------------------------------------------------------
+_PEG_MAX_GROWTH = 0.25  # cap historical earnings g; 25%/yr forever is noise
+
+
+def _earnings_cagr(earnings_annual: pd.Series) -> Optional[float]:
+    """5-yr earnings CAGR, with sanity caps. ``None`` if not computable."""
+    e = earnings_annual.dropna()
+    if len(e) < 4 or e.iloc[0] <= 0 or e.iloc[-1] <= 0:
+        return None
+    n = len(e) - 1
+    g = (e.iloc[-1] / e.iloc[0]) ** (1 / n) - 1
+    if not np.isfinite(g) or g <= 0:
+        return None
+    return float(min(g, _PEG_MAX_GROWTH))
+
+
+def _has_consistent_units(b: StockBundle) -> tuple[bool, bool]:
+    """Returns (revenue_ok, ebitda_ok).
+
+    yfinance occasionally returns IT-exporter revenue / EBITDA in USD
+    while price and EPS are in INR — making peer ratios meaningless. The
+    cheap detection: net income (EPS × shares, all in INR) must not
+    exceed revenue or EBITDA. If it does, the unit is inconsistent and
+    the multiple has to be dropped.
+    """
+    if not (np.isfinite(b.eps_ttm) and np.isfinite(b.shares_outstanding)
+            and b.shares_outstanding > 0):
+        # Can't verify; trust the data.
+        return True, True
+    ni = b.eps_ttm * b.shares_outstanding
+    if ni <= 0:
+        return True, True
+    rev_ok = not (np.isfinite(b.revenue) and b.revenue > 0 and b.revenue < ni)
+    ebitda_ok = not (np.isfinite(b.ebitda) and b.ebitda > 0 and b.ebitda < ni)
+    return rev_ok, ebitda_ok
+
+
 def _peer_multiple(b: StockBundle, kind: str) -> Optional[float]:
     if not np.isfinite(b.price) or b.price <= 0:
         return None
@@ -92,26 +132,25 @@ def _peer_multiple(b: StockBundle, kind: str) -> Optional[float]:
         return b.price / b.book_value_per_share if (np.isfinite(b.book_value_per_share) and b.book_value_per_share > 0) else None
 
     if kind == "PS":
+        rev_ok, _ = _has_consistent_units(b)
+        if not rev_ok:
+            return None
         return b.price / b.sales_per_share_ttm if (np.isfinite(b.sales_per_share_ttm) and b.sales_per_share_ttm > 0) else None
 
     if kind == "EV_EBITDA":
+        _, ebitda_ok = _has_consistent_units(b)
+        if not ebitda_ok:
+            return None
         if not (np.isfinite(b.enterprise_value) and np.isfinite(b.ebitda) and b.ebitda > 0):
             return None
         return b.enterprise_value / b.ebitda
 
     if kind == "PEG":
-        # PEG = (P/E) / (earnings growth %)
         pe = _peer_multiple(b, "PE")
         if pe is None:
             return None
-        # 5-yr earnings CAGR proxy
-        e = b.earnings_annual.dropna()
-        if len(e) >= 4 and e.iloc[0] > 0:
-            n = len(e) - 1
-            g = (e.iloc[-1] / e.iloc[0]) ** (1 / n) - 1
-        else:
-            g = None
-        if g is None or g <= 0:
+        g = _earnings_cagr(b.earnings_annual)
+        if g is None:
             return None
         return pe / (g * 100)
 
@@ -149,10 +188,15 @@ def _implied_price(target: StockBundle, multiple_name: str, agg_multiple: float)
         m = target.book_value_per_share
         return agg_multiple * m, m
     if multiple_name == "PS":
+        rev_ok, _ = _has_consistent_units(target)
+        if not rev_ok:
+            return float("nan"), float("nan")
         m = target.sales_per_share_ttm
         return agg_multiple * m, m
     if multiple_name == "EV_EBITDA":
-        # implied EV → equity value → per share
+        _, ebitda_ok = _has_consistent_units(target)
+        if not ebitda_ok:
+            return float("nan"), float("nan")
         if not (np.isfinite(target.ebitda) and target.ebitda > 0):
             return float("nan"), float("nan")
         implied_ev = agg_multiple * target.ebitda
@@ -161,14 +205,8 @@ def _implied_price(target: StockBundle, multiple_name: str, agg_multiple: float)
             return float("nan"), target.ebitda
         return equity_value / target.shares_outstanding, target.ebitda
     if multiple_name == "PEG":
-        # Implied P/E = PEG * g; then implied price = PE * EPS
-        e = target.earnings_annual.dropna()
-        if len(e) >= 4 and e.iloc[0] > 0:
-            n = len(e) - 1
-            g = (e.iloc[-1] / e.iloc[0]) ** (1 / n) - 1
-        else:
-            g = None
-        if g is None or g <= 0 or not (np.isfinite(target.eps_ttm) and target.eps_ttm > 0):
+        g = _earnings_cagr(target.earnings_annual)
+        if g is None or not (np.isfinite(target.eps_ttm) and target.eps_ttm > 0):
             return float("nan"), float("nan")
         implied_pe = agg_multiple * (g * 100)
         return implied_pe * target.eps_ttm, g
@@ -184,8 +222,62 @@ def value_by_multiples(
     *,
     trim_pct: float = SETTINGS.multiple_trim_pct,
 ) -> RelativeValuation:
+    """Value the target using sector-aware peer multiples.
+
+    Computes P/E, P/B, P/S, EV/EBITDA, and PEG implied prices, aggregates
+    each via a trimmed harmonic mean (the standard Aswath Damodaran
+    correction for the upward bias of arithmetic means on ratios), then
+    combines them with sector-specific weights into a single weighted
+    intrinsic value.
+
+    Parameters
+    ----------
+    peer_set : PeerSet
+        Output of :func:`peer_identification.find_peers`. Below
+        ``SETTINGS.min_peers`` the function returns NaN multiples and a
+        ``weighted_value`` of NaN so the integrated engine flags the
+        relative track unavailable.
+    trim_pct : float, optional
+        Fraction trimmed from each tail of the per-multiple peer
+        distribution before harmonic-mean aggregation. Defaults to
+        ``SETTINGS.multiple_trim_pct``.
+
+    Returns
+    -------
+    RelativeValuation
+        Per-multiple results, sector-weighted blend, median fallback, and
+        any caveats (insufficient peers, negative-earnings exclusions, …).
+    """
     target = peer_set.target
     peers = peer_set.peers
+
+    # Hard-fail when the peer pool is below the minimum. Three random
+    # same-sector names produce a number, but it isn't a defensible
+    # relative valuation (this was how SWIGGY against TITAN/HAVELLS/VOLTAS
+    # got past the engine). Force the blender to fall back to N/A.
+    if len(peers) < SETTINGS.min_peers:
+        empty = pd.Series(dtype=float)
+        return RelativeValuation(
+            multiples={
+                k: MultipleResult(
+                    multiple_name=k,
+                    peer_values=empty,
+                    aggregated_multiple=float("nan"),
+                    target_per_share_metric=float("nan"),
+                    implied_price=float("nan"),
+                    valid=False,
+                    note=f"Peer pool too small ({len(peers)} < {SETTINGS.min_peers}).",
+                )
+                for k in ("PE", "PB", "PS", "EV_EBITDA", "PEG")
+            },
+            weighted_value=float("nan"),
+            weights={},
+            median_value=float("nan"),
+            notes=[
+                f"Relative valuation unavailable: only {len(peers)} peers "
+                f"(need ≥{SETTINGS.min_peers}). {peer_set.method}"
+            ],
+        )
 
     multiples_to_run = ["PE", "PB", "PS", "EV_EBITDA", "PEG"]
     results: Dict[str, MultipleResult] = {}
@@ -207,6 +299,26 @@ def value_by_multiples(
             valid=np.isfinite(implied) and implied > 0,
             note="" if np.isfinite(implied) else "Insufficient data",
         )
+
+    # Outlier filter: if any multiple's implied price is more than 5x off
+    # the median of the other valid implieds, that multiple is almost
+    # certainly built on bad units / corrupted statements (we have seen
+    # yfinance return USD revenue for IT exporters). Drop it before the
+    # weighted average so it can't drag the answer.
+    valid_implied = [
+        (k, results[k].implied_price)
+        for k in results if results[k].valid
+    ]
+    if len(valid_implied) >= 3:
+        med = float(np.median([v for _, v in valid_implied]))
+        if med > 0:
+            for k, v in valid_implied:
+                if v <= 0 or v < 0.20 * med or v > 5.0 * med:
+                    results[k].valid = False
+                    results[k].note = (
+                        f"Implied price ₹{v:,.0f} is {v/med:.1f}× peer median "
+                        f"(₹{med:,.0f}); excluded as outlier."
+                    )
 
     # Sector-aware weights, dropping invalid multiples and renormalising.
     base_weights = SECTOR_OVERRIDES.get(target.sector, DEFAULT_MULTIPLE_WEIGHTS)

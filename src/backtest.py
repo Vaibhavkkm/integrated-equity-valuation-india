@@ -49,7 +49,7 @@ that is out of scope for a student project.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -87,10 +87,32 @@ def append_signal(
     """Persist a (ticker, signal) pair so we can grade it later.
 
     The log is a CSV — easy to inspect in Excel, easy to merge into a
-    pandas DataFrame in `evaluate_log`.
+    pandas DataFrame in :func:`evaluate_log`.
+
+    Parameters
+    ----------
+    ticker : str
+        NSE ticker (with ``.NS`` suffix). Stored verbatim.
+    recommendation : str
+        One of ``BUY`` / ``HOLD`` / ``SELL`` / ``N/A``. The grading
+        function bins on this column.
+    blended_value : float
+        The DDM/relative-blended intrinsic value from
+        :class:`ValuationResult`.
+    price : float
+        Spot price at signal time. Returns are computed against this.
+    margin_of_safety : float
+        ``(blended_value - price) / price`` at signal time, persisted so
+        post-hoc analyses don't have to recompute it.
+    quality_score : float
+        Composite 0-100 score so backtests can stratify by quality.
+    when : datetime, optional
+        Signal timestamp. Defaults to ``datetime.now(timezone.utc)`` for
+        live runs; pass an explicit value when replaying historical
+        recommendations.
     """
     row = {
-        "signal_date": (when or datetime.utcnow()).strftime("%Y-%m-%d"),
+        "signal_date": (when or datetime.now(timezone.utc)).strftime("%Y-%m-%d"),
         "ticker": ticker,
         "recommendation": recommendation,
         "blended_value": round(float(blended_value), 4),
@@ -163,7 +185,25 @@ def evaluate_log(
     log_path: Path = _LOG_PATH,
     benchmark: str = "^NSEI",
 ) -> BacktestResult:
-    """Replay signals from `log_path` and grade them."""
+    """Replay signals from ``log_path`` and grade them.
+
+    Parameters
+    ----------
+    horizon_months : int, optional
+        Forward-return window. Defaults to 12 months.
+    log_path : Path, optional
+        Location of the persisted CSV. Defaults to
+        ``REPORT_DIR / "backtest_log.csv"``.
+    benchmark : str, optional
+        Yahoo ticker used to compute the index-relative hit rate.
+        Defaults to the Nifty 50 (``^NSEI``).
+
+    Returns
+    -------
+    BacktestResult
+        Empty result with a "log file not found" note when the CSV is
+        missing; otherwise the output of :func:`evaluate_signals`.
+    """
     if not log_path.exists():
         return BacktestResult(
             horizon_months=horizon_months,
@@ -187,7 +227,27 @@ def evaluate_signals(
 ) -> BacktestResult:
     """Grade an explicit signal panel.
 
-    Required columns: signal_date, ticker, recommendation, price_at_signal.
+    Pulls forward prices from yfinance, bins returns by recommendation,
+    and reports the BUY-minus-SELL spread plus the BUY hit rate against
+    the benchmark.
+
+    Parameters
+    ----------
+    signals : pd.DataFrame
+        Required columns: ``signal_date``, ``ticker``, ``recommendation``,
+        ``price_at_signal``. Extra columns are ignored.
+    horizon_months : int, optional
+        Forward-return horizon (e.g. 6 / 12 / 24). Defaults to 12.
+    benchmark : str, optional
+        Yahoo benchmark ticker for the index-relative hit rate. Defaults
+        to the Nifty 50 (``^NSEI``).
+
+    Returns
+    -------
+    BacktestResult
+        Per-bin statistics, BUY-minus-SELL spread, BUY hit rate, and a
+        notes list flagging any signals dropped due to missing data
+        (survivorship bias).
     """
     required = {"signal_date", "ticker", "recommendation", "price_at_signal"}
     missing = required - set(signals.columns)
@@ -270,7 +330,7 @@ def _forward_return(
     """
     if yf is None:
         return None
-    if end > pd.Timestamp.utcnow().tz_localize(None):
+    if end > pd.Timestamp.now(tz="UTC").tz_localize(None):
         return None  # not enough time has passed
 
     # Pull a small buffer either side so we get the nearest trading day.
@@ -313,5 +373,18 @@ def rolling_backtest(
     *,
     horizons_months: tuple = (6, 12, 24),
 ) -> Dict[int, BacktestResult]:
-    """Run the same panel against multiple horizons. Useful for the report."""
+    """Run the same panel against multiple horizons. Useful for the report.
+
+    Parameters
+    ----------
+    signals : pd.DataFrame
+        Same shape as :func:`evaluate_signals` expects.
+    horizons_months : tuple of int, optional
+        Horizons to run. Defaults to ``(6, 12, 24)``.
+
+    Returns
+    -------
+    dict[int, BacktestResult]
+        Horizon → graded result.
+    """
     return {h: evaluate_signals(signals, horizon_months=h) for h in horizons_months}

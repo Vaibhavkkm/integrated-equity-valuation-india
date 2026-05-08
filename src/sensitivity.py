@@ -58,7 +58,34 @@ def tornado_ddm(
     g_band: float = 0.01,
     payout_band: float = 0.10,
 ) -> List[TornadoBar]:
-    """One-at-a-time DDM sensitivity."""
+    """One-at-a-time DDM sensitivity.
+
+    Bumps each lever individually around the base case, holding the
+    others fixed, and ranks the resulting bars by absolute swing. The
+    output drives the tornado chart in the dashboard and the PDF report.
+
+    Parameters
+    ----------
+    target : StockBundle
+        The stock being valued. Provides DPS, EPS, ROE, payout, and
+        history needed by ``select_and_value`` under each perturbation.
+    base_ke : float
+        Base cost of equity (decimal) — the centre of the Ke band.
+    base_g_terminal : float
+        Base terminal growth rate (decimal) — the centre of the g band.
+    ke_band : float, optional
+        Half-width of the cost-of-equity perturbation. Defaults to 1%.
+    g_band : float, optional
+        Half-width of the terminal-growth perturbation. Defaults to 1%.
+    payout_band : float, optional
+        Half-width of the payout-ratio perturbation, clamped to
+        ``[0.05, 0.95]`` after applying. Defaults to 10 percentage points.
+
+    Returns
+    -------
+    list[TornadoBar]
+        Sorted by descending swing (largest mover first).
+    """
     base_iv = _ddm_value(target, base_ke, base_g_terminal, target.payout_ratio)
 
     bars: List[TornadoBar] = []
@@ -122,7 +149,41 @@ def monte_carlo_blended(
     n_paths: int = SETTINGS.mc_paths,
     seed: int = SETTINGS.mc_seed,
 ) -> MonteCarloResult:
-    """Run a joint MC over DDM and Relative tracks, then blend each path."""
+    """Run a joint MC over DDM and Relative tracks, then blend each path.
+
+    Draws ``n_paths`` correlated samples for cost of equity, terminal
+    growth, payout, and a per-multiple noise term, recomputes the DDM
+    and relative implied prices on each draw, and returns the
+    distribution of blended intrinsic values that drives the project's
+    confidence bands.
+
+    Parameters
+    ----------
+    target : StockBundle
+        The stock being valued — supplies DPS, EPS, ROE, history.
+    coe : CostOfEquity
+        Base cost-of-equity object. Its ``ke`` is the centre of the
+        Ke distribution.
+    rel : RelativeValuation
+        Output of :func:`relative_valuation.value_by_multiples`. Provides
+        the per-multiple peer distributions sampled inside the MC loop.
+    base_g_terminal : float
+        Base terminal growth rate (decimal).
+    blend_w_ddm : float
+        Weight applied to the DDM track on each path; the relative track
+        receives ``1 - blend_w_ddm``.
+    n_paths : int, optional
+        Number of Monte Carlo paths. Defaults to ``SETTINGS.mc_paths``
+        (10,000 in the project default).
+    seed : int, optional
+        RNG seed for reproducibility. Defaults to ``SETTINGS.mc_seed``.
+
+    Returns
+    -------
+    MonteCarloResult
+        ``samples`` (np.ndarray of finite blended values), plus the
+        P10 / P50 / P90 / mean / std summary statistics.
+    """
     rng = np.random.default_rng(seed)
 
     # Ke ~ truncated normal around base, σ=80 bps; clip to [4%, 25%]
