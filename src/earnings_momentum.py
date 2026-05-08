@@ -132,7 +132,7 @@ def _peer_median_yoy(peers: list[StockBundle], attr: str) -> tuple[float, int]:
     growths: list[float] = []
     for p in peers:
         s = getattr(p, attr, None)
-        if s is None or s.empty:
+        if s is None or not hasattr(s, "empty") or s.empty:
             continue
         g = _yoy_growth(s)
         if np.isfinite(g):
@@ -167,8 +167,14 @@ def earnings_momentum(
         Container with growth metrics, peer comparison, and a 0-10 score
         that downstream code folds into the quality composite.
     """
-    qe = target.quarterly_earnings if target.quarterly_earnings is not None else pd.Series(dtype=float)
-    qr = target.quarterly_revenue if target.quarterly_revenue is not None else pd.Series(dtype=float)
+    # Defensive: a peer or target loaded from an older cache pickle may not
+    # carry these attributes at all (pickle bypasses dataclass defaults).
+    # ``StockBundle.__setstate__`` backfills, but use getattr here too so a
+    # mis-shaped peer never poisons the whole call.
+    qe = getattr(target, "quarterly_earnings", None)
+    qr = getattr(target, "quarterly_revenue", None)
+    qe = qe if qe is not None else pd.Series(dtype=float)
+    qr = qr if qr is not None else pd.Series(dtype=float)
 
     # If we don't have at least one full year of quarterly history,
     # return a neutral result rather than fake confidence.
