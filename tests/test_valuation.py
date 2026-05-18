@@ -59,7 +59,7 @@ def test_two_stage_ddm_basic():
 def test_h_model_collapses_to_gordon_when_g_high_equals_g_terminal():
     """When g_high == g_terminal, H-Model should equal Gordon."""
     g = 0.04; ke = 0.10; d0 = 2.0
-    iv_h = h_model(d0=d0, g_high=g, g_terminal=g, ke=ke, half_life_years=10)
+    iv_h = h_model(d0=d0, g_high=g, g_terminal=g, ke=ke, transition_years=10)
     iv_g = gordon_growth(d1=d0 * (1 + g), ke=ke, g=g)
     assert iv_h.value_per_share == pytest.approx(iv_g.value_per_share, rel=1e-3)
 

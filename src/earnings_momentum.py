@@ -91,11 +91,13 @@ class EarningsMomentum:
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
-def _yoy_growth(q: pd.Series, lag: int = 4) -> float:
-    """Year-on-year growth between the latest value and the value `lag` rows back.
+def _period_growth(q: pd.Series, lag: int = 4) -> float:
+    """Period-on-period growth: latest value vs the value ``lag`` rows back.
 
-    Uses ratio-form so a base of zero or negative returns NaN rather than
-    producing a meaningless infinite or sign-flipped percentage.
+    With ``lag=4`` on a quarterly series this is year-on-year (YoY); with
+    ``lag=1`` it is quarter-on-quarter (QoQ). Uses ratio-form so a base of
+    zero or negative returns NaN rather than producing a meaningless
+    infinite or sign-flipped percentage.
     """
     s = q.dropna()
     if len(s) <= lag:
@@ -134,7 +136,7 @@ def _peer_median_yoy(peers: list[StockBundle], attr: str) -> tuple[float, int]:
         s = getattr(p, attr, None)
         if s is None or not hasattr(s, "empty") or s.empty:
             continue
-        g = _yoy_growth(s)
+        g = _period_growth(s)
         if np.isfinite(g):
             growths.append(g)
     if not growths:
@@ -185,10 +187,10 @@ def earnings_momentum(
             breakdown={"reason": "insufficient quarterly history (need ≥5 quarters)"},
         )
 
-    yoy_p = _yoy_growth(qe)
-    yoy_r = _yoy_growth(qr)
-    qoq_p = _yoy_growth(qe, lag=1)
-    qoq_r = _yoy_growth(qr, lag=1)
+    yoy_p = _period_growth(qe)
+    yoy_r = _period_growth(qr)
+    qoq_p = _period_growth(qe, lag=1)
+    qoq_r = _period_growth(qr, lag=1)
     streak = _consecutive_yoy_positive(qe)
 
     # Peer medians

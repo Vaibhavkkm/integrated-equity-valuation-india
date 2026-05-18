@@ -27,9 +27,15 @@ will use. It wires every other module into a single pipeline:
     Optionally: persist signal for backtesting
 
 The blender tilts the DDM weight away from the brief's 50% baseline
-based on dividend quality and earnings track length — capped at ±15 pp,
-so the project's headline 50/50 methodology is preserved while the
-numbers stay honest.
+based on dividend quality, earnings track length, and the DDM-vs-
+Relative gap. The tilt is **asymmetric**: up to **+15 pp toward DDM**
+(reserved for mature, high-quality dividend payers) and up to **−40 pp
+away from DDM** (when the firm is a low-payout retainer or when the two
+tracks disagree sharply — in both cases the DDM mechanically under-
+prices the firm because it can only value the dividend stream, not the
+reinvested cash). The default 50/50 still holds for the typical
+mid-payout candidate; the asymmetry only fires when one of the two
+guards above triggers.
 
 The confidence label (HIGH / MEDIUM / LOW) is a separate axis from the
 recommendation. It folds in:
@@ -434,7 +440,7 @@ def value_stock(
                  q.composite, q.piotroski_f, q.dividend_quality, q.earnings_momentum)
 
     # ------------------------------------------------------------------
-    # 6. Blend
+    # 7. Blend
     # ------------------------------------------------------------------
     w_ddm, w_rel = _blend_weights(ddm, rel, q, target)
 
@@ -454,7 +460,7 @@ def value_stock(
     )
 
     # ------------------------------------------------------------------
-    # 7. Reverse DCF — what growth is the market pricing in?
+    # 8. Reverse DCF — what growth is the market pricing in?
     # ------------------------------------------------------------------
     g_hist_for_compare: Optional[float] = None
     dps = target.dividends_annual.dropna()
@@ -473,13 +479,13 @@ def value_stock(
         log.info("  %s", rev.summary())
 
     # ------------------------------------------------------------------
-    # 8. Monte Carlo + Tornado
+    # 9. Monte Carlo + Tornado
     # ------------------------------------------------------------------
     mc = monte_carlo_blended(target, coe, rel, g_term, w_ddm)
     tornado = tornado_ddm(target, coe.ke, g_term) if ddm.valid else []
 
     # ------------------------------------------------------------------
-    # 9. Confidence label
+    # 10. Confidence label
     # ------------------------------------------------------------------
     confidence, conf_notes = _confidence(
         mc=mc, blended=blended, data_q=data_q, peers=peers, ddm_valid=ddm.valid,
@@ -512,7 +518,7 @@ def value_stock(
     )
 
     # ------------------------------------------------------------------
-    # 10. Optional: persist for later backtesting
+    # 11. Optional: persist for later backtesting
     # ------------------------------------------------------------------
     if log_for_backtest and rec in ("BUY", "HOLD", "SELL"):
         try:

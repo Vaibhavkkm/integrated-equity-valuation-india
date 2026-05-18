@@ -203,25 +203,6 @@ class StockBundle:
     # company is funding dividends from debt rather than earnings.
     payout_ratio_raw: float = field(default=float("nan"))
 
-    # ------------------------------------------------------------------
-    # Cache-forward compatibility
-    # ------------------------------------------------------------------
-    # Pickle restores objects by populating ``__dict__`` directly — it does
-    # NOT call ``__init__`` and does NOT apply dataclass field defaults.
-    # That means any field added to this class AFTER older cache files were
-    # written will be missing on unpickle, and attribute access on it will
-    # raise AttributeError at runtime even though the dataclass declaration
-    # has a default. Override ``__setstate__`` to backfill those fields so
-    # stale caches keep working without forcing users to wipe ``cache/``.
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        if not hasattr(self, "quarterly_earnings") or self.quarterly_earnings is None:
-            self.quarterly_earnings = pd.Series(dtype=float)
-        if not hasattr(self, "quarterly_revenue") or self.quarterly_revenue is None:
-            self.quarterly_revenue = pd.Series(dtype=float)
-        if not hasattr(self, "payout_ratio_raw"):
-            self.payout_ratio_raw = float("nan")
-
     # Convenience
     def __post_init__(self):
         # Preserve the *raw* payout for downstream sustainability checks

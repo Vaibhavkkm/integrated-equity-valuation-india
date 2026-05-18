@@ -29,7 +29,6 @@ All models return an `IntrinsicValue` object with:
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -191,15 +190,17 @@ def h_model(
     g_high: float,
     g_terminal: float,
     ke: float,
-    half_life_years: float = SETTINGS.transition_years,
+    transition_years: float = SETTINGS.transition_years * 2,
 ) -> IntrinsicValue:
     """H-Model closed form (Fuller & Hsia, 1984).
 
         V = [D0 * (1 + g_L) + D0 * H * (g_S − g_L)] / (Ke − g_L)
 
-    where H = half_life_years / 2, g_S is the initial high growth rate, and
-    g_L is the terminal growth rate. Growth declines linearly from g_S to
-    g_L over ``2H`` years, eliminating the cliff in the two-stage model.
+    where ``H = transition_years / 2`` (the textbook ``H`` parameter),
+    g_S is the initial high growth rate, and g_L is the terminal growth
+    rate. Growth declines linearly from g_S to g_L over the full
+    ``transition_years`` window, eliminating the cliff in the two-stage
+    model.
 
     Parameters
     ----------
@@ -212,9 +213,12 @@ def h_model(
         below ``ke`` upstream.
     ke : float
         Cost of equity (decimal).
-    half_life_years : float, optional
-        Number of years over which growth decays from ``g_S`` to ``g_L``.
-        ``H`` is half this value. Defaults to ``SETTINGS.transition_years``.
+    transition_years : float, optional
+        Full window (``2H`` years) over which growth decays from ``g_S``
+        to ``g_L``. Defaults to ``SETTINGS.transition_years * 2`` so the
+        H-Model fades over roughly twice as long as the discrete fade in
+        the three-stage variant — appropriate because the H-Model has no
+        explicit high-growth phase before the fade begins.
 
     Returns
     -------
@@ -234,7 +238,7 @@ def h_model(
             note="Company does not currently pay dividends.",
         )
 
-    H = half_life_years / 2.0
+    H = transition_years / 2.0
     numerator = d0 * (1 + g_terminal) + d0 * H * (g_high - g_terminal)
     v = numerator / (ke - g_terminal)
     return IntrinsicValue(
@@ -242,7 +246,7 @@ def h_model(
         model="H-Model",
         inputs=dict(
             D0=d0, g_S=g_high, g_L=g_terminal, Ke=ke, H=H,
-            half_life_years=half_life_years,
+            transition_years=transition_years,
         ),
         valid=True,
         note=note or "",
@@ -346,6 +350,14 @@ def historical_dividend_cagr(dps_series: pd.Series, fallback: float = 0.05) -> f
     (think: Coal India 2021), which make a naive CAGR explode. We drop the
     top and bottom value before computing growth, then re-sort by date
     so the geometric-mean math is anchored to the chronological endpoints.
+
+    Caveat: trimming by value can move the chronological endpoints inward
+    (e.g. if the largest year happens to be the most recent, we end up
+    computing CAGR off the *second*-most-recent year). The resulting
+    ``n_years = len(s) − 1`` then slightly understates the true elapsed
+    window. This is an accepted trade-off — the alternative (keeping
+    extreme years) lets a single special dividend dominate the geometric
+    mean, which is the failure mode this function exists to prevent.
 
     Parameters
     ----------
@@ -613,11 +625,18 @@ def select_and_value(
         d1 = dps_ttm * (1 + g_terminal)
         return gordon_growth(d1=d1, ke=ke, g=g_terminal)
 
-    # --- H-Model: fast grower with low payout ---
+    # --- H-Model: fast grower OR low-payout reinvestor ---
     # Require g_high > 0 — a shrinking dividend stream with low payout
     # belongs in three-stage (which can model the fade explicitly), not
     # H-Model (whose closed form assumes the high-stage growth fades
     # *down* to terminal, not up).
+    #
+    # The low-payout (< 30%) branch is intentional: an under-30% payer
+    # that doesn't hit the 12% growth bar is still a reinvestor whose
+    # fade is better modelled as a smooth slope from g_high → g_terminal
+    # than as a sharp two/three-stage cliff. If g_high happens to equal
+    # g_terminal, the H-Model degenerates to Gordon (see the test in
+    # test_valuation.py), so this branch is safe for low-g reinvestors too.
     is_high_growth = (g_high > 0) and (g_high >= 0.12 or payout_for_branch < 0.30)
     if is_high_growth:
         return h_model(
@@ -625,7 +644,7 @@ def select_and_value(
             g_high=g_high,
             g_terminal=g_terminal,
             ke=ke,
-            half_life_years=SETTINGS.transition_years * 2,
+            transition_years=SETTINGS.transition_years * 2,
         )
 
     # --- Default: Three-Stage ---

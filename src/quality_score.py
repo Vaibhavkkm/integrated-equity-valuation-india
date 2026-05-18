@@ -278,8 +278,12 @@ def quality_score(
     Blends Piotroski (30%), Altman Z'' (25%), dividend quality (25%), and
     earnings momentum (20%) on a calibration that still maps an "average
     firm" to roughly 50. Earlier versions used 35/30/35 without a
-    momentum pillar; the rebalance shaves ~5 pp from each existing
-    pillar to make room without inflating the composite.
+    momentum pillar; the rebalance moved Piotroski 35→30 (−5), Altman
+    30→25 (−5), and dividend quality 35→25 (−10) to make room for the
+    new 20-pp momentum slice without inflating the composite. Dividend
+    quality took the biggest cut because it had the largest weight under
+    the old scheme and was the most correlated with the new momentum
+    pillar (both reward firms with consistent, growing earnings).
 
     When ``momentum`` is omitted (the integrated pipeline always passes
     one; standalone callers may not), the momentum pillar contributes

@@ -8,8 +8,8 @@ means 7.1%, not 71%.
 """
 from __future__ import annotations
 from pathlib import Path
-from dataclasses import dataclass, field
-from typing import Dict, List
+from dataclasses import dataclass
+from typing import Dict
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +118,6 @@ DEFAULT_UNIVERSE: Dict[str, str] = {
     "WIPRO.NS": "Information Technology",
     "HCLTECH.NS": "Information Technology",
     "TECHM.NS": "Information Technology",
-    "LTIM.NS": "Information Technology",
     # Banking
     "HDFCBANK.NS": "Banking",
     "ICICIBANK.NS": "Banking",
@@ -210,10 +209,6 @@ DEFAULT_UNIVERSE: Dict[str, str] = {
     "IRCTC.NS": "Internet & Platform",
     "DELHIVERY.NS": "Internet & Platform",
 }
-
-
-# Country credit spread (used for default-spread-adjusted Ke when needed).
-INDIA_DEFAULT_SPREAD: float = 0.0210
 
 
 # Reporting metadata

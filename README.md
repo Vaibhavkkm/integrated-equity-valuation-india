@@ -130,16 +130,21 @@ Averaging their P/Es is nonsense; clustering separates them properly.
 
 ### 3. Quality scoring decides how much to trust each track
 
-Two checks run before the blend:
+Four checks run before the blend:
 - **Piotroski F-Score** (0-9) — fundamental health
 - **Altman Z'' (EM variant)** — distress likelihood for emerging-market firms
 - **Dividend Quality** (0-10) — track length, cuts, payout sanity, growth
+- **Earnings Momentum** (0-10) — recent quarterly trend vs the K-Means peer set
 
-These fold into a 0-100 composite that *modulates the blend weight*. A
-stock with a 9-year clean dividend record gets DDM bumped up. A
-non-payer gets DDM zeroed out and pure relative valuation. The tilt is
-capped at ±15 pp so the project's headline 50/50 methodology survives
-intact for the typical case.
+These fold into a 0-100 composite (weights 30/25/25/20) that *modulates
+the blend weight*. A stock with a 9-year clean dividend record gets DDM
+bumped up. A non-payer gets DDM zeroed out and pure relative valuation.
+The tilt is **asymmetric on purpose**: up to **+15 pp** toward DDM (for
+mature payers with strong track records), and up to **−40 pp** away from
+DDM (because the DDM mechanically under-prices low-payout retainers, so
+when the two tracks disagree sharply for a reinvestor like an IT name,
+the relative track has to carry more weight). The default for a typical
+50/50 candidate stays exactly 50/50.
 
 ### 4. The originality work — what most student projects skip
 
@@ -306,11 +311,12 @@ integrated-equity-valuation-india/
 │   ├── exceptions.py               # Typed error hierarchy
 │   ├── logging_setup.py            # Centralized logging
 │   ├── ddm_models.py               # Gordon / 2-stage / 3-stage / H-Model
-│   ├── cost_of_equity.py           # CAPM, beta regression, Hamada, WACC
+│   ├── cost_of_equity.py           # CAPM, beta regression, Hamada
 │   ├── peer_identification.py      # K-Means + Mahalanobis peer selection
 │   ├── relative_valuation.py       # Multiples + sector-aware weighting
-│   ├── quality_score.py            # Piotroski F + Altman Z'' + dividend
-│   ├── sensitivity.py              # Tornado + Monte Carlo
+│   ├── quality_score.py            # Piotroski F + Altman Z'' + dividend + momentum
+│   ├── earnings_momentum.py        # Quarterly trend vs peer median (0-10)
+│   ├── sensitivity.py              # Tornado + vectorised Monte Carlo
 │   ├── reverse_dcf.py              # Implied-expectations solver
 │   ├── backtest.py                 # Forward-return grading
 │   ├── integrated_valuation.py     # The pipeline that wires it all
@@ -318,7 +324,7 @@ integrated-equity-valuation-india/
 │   └── report_generator.py         # PDF research note
 ├── data/
 │   └── nifty500_universe.csv       # Sector-mapped universe
-├── tests/                          # 74 tests, runs in ~1 second
+├── tests/                          # 129 tests, runs in ~2 seconds
 │   ├── conftest.py                 # Shared fixtures
 │   ├── _factory.py                 # Synthetic StockBundle factory
 │   ├── test_valuation.py
@@ -327,6 +333,13 @@ integrated-equity-valuation-india/
 │   ├── test_reverse_dcf.py
 │   ├── test_backtest.py
 │   ├── test_relative_valuation.py
+│   ├── test_earnings_momentum.py
+│   ├── test_cost_of_equity.py
+│   ├── test_monte_carlo.py
+│   ├── test_peer_identification.py
+│   ├── test_quality_score.py
+│   ├── test_report_generator.py
+│   ├── test_app_smoke.py
 │   └── test_exceptions.py
 ├── reports/                        # Generated PDFs and backtest logs
 └── cache/                          # On-disk financials cache
@@ -340,7 +353,7 @@ integrated-equity-valuation-india/
 pytest tests/ -v
 ```
 
-Currently **74 tests, all passing in ~1.3 seconds**. Coverage spans:
+Currently **129 tests, all passing in ~2 seconds**. Coverage spans:
 
 - DDM closed forms checked against textbook (Damodaran) values
 - Bayesian shrinkage invariants (n→0 returns prior; n→∞ returns data)

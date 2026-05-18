@@ -150,38 +150,3 @@ def test_quality_score_handles_missing_momentum(mature_payer):
     assert 0 <= q.composite <= 100
 
 
-def test_stale_cache_pickle_unpickles_with_quarterly_backfill():
-    """Regression: cache files written before the quarterly_* fields existed
-    must still unpickle and not raise AttributeError on attribute access.
-
-    Pickle restores objects by setting ``__dict__`` directly, bypassing
-    dataclass defaults — so the only thing that saves us is the
-    ``__setstate__`` shim on StockBundle. This test simulates the
-    pre-migration state by stripping the new fields from a fresh bundle
-    and round-tripping through pickle.
-    """
-    import pickle
-
-    b = make_bundle()
-    state = b.__dict__.copy()
-    # Simulate an old cache: no quarterly fields at all.
-    state.pop("quarterly_earnings", None)
-    state.pop("quarterly_revenue", None)
-
-    # Build the stripped pickle by hand — same shape pickle.dumps would
-    # produce on the old class.
-    blob = pickle.dumps((type(b), state))
-    cls, restored_state = pickle.loads(blob)
-    obj = cls.__new__(cls)
-    obj.__setstate__(restored_state)
-
-    # The new attributes must exist (backfilled) and be empty Series.
-    assert hasattr(obj, "quarterly_earnings")
-    assert hasattr(obj, "quarterly_revenue")
-    assert obj.quarterly_earnings.empty
-    assert obj.quarterly_revenue.empty
-
-    # And the momentum module must run cleanly against this stale bundle.
-    m = earnings_momentum(obj, _FakePeerSet([]))
-    assert m.score == 0
-    assert "insufficient" in m.breakdown.get("reason", "").lower()

@@ -12,9 +12,8 @@ getting Ke right:
   3. If we don't have enough price history (< 2 years), we fall back to
      the sector unlevered beta from Damodaran's India tables and re-lever
      using the firm's own D/E.
-  4. CAPM is the base. We then add a country default spread modifier
-     for distressed/illiquid names and a small-cap premium when the
-     market cap is below ₹5,000 crore.
+  4. CAPM is the base. We then add a small-cap premium when the market
+     cap is below ₹5,000 crore.
 
 The output is a `CostOfEquity` object whose `ke` field is what every
 DDM call expects.
@@ -34,7 +33,6 @@ except ImportError:
 
 from config import (
     EQUITY_RISK_PREMIUM_IN,
-    INDIA_DEFAULT_SPREAD,
     RISK_FREE_RATE_IN,
     SECTOR_UNLEVERED_BETA,
     SETTINGS,
@@ -176,7 +174,6 @@ def cost_of_equity(
     equity: float,
     risk_free: float = RISK_FREE_RATE_IN,
     erp: float = EQUITY_RISK_PREMIUM_IN,
-    add_default_spread: bool = False,
     market_prices: Optional[pd.Series] = None,
 ) -> CostOfEquity:
     """Compute Ke for a single Indian equity.
@@ -212,18 +209,12 @@ def cost_of_equity(
     # ----- CAPM core -----
     ke = risk_free + beta_adj * erp
 
-    # ----- Modifiers -----
+    # ----- Small-cap premium -----
     small_cap_prem = 0.0
     if np.isfinite(market_cap) and market_cap < _SMALL_CAP_THRESHOLD_INR:
         small_cap_prem = _SMALL_CAP_PREMIUM
         ke += small_cap_prem
         notes.append("Small-cap premium of 150 bps applied.")
-
-    if add_default_spread:
-        ke += INDIA_DEFAULT_SPREAD
-        notes.append(
-            "India default spread added — appropriate only for distressed names."
-        )
 
     return CostOfEquity(
         ke=float(ke),
@@ -255,45 +246,3 @@ def _download_market_prices() -> pd.Series:
 
     _download_market_prices._cache = prices  # type: ignore
     return prices
-
-
-# ---------------------------------------------------------------------------
-# WACC — used by the EV-based relative valuation paths
-# ---------------------------------------------------------------------------
-def wacc(
-    *,
-    ke: float,
-    market_cap: float,
-    total_debt: float,
-    pre_tax_kd: float = 0.085,
-    tax_rate: float = EFFECTIVE_TAX_RATE_IN,
-) -> float:
-    """Standard WACC with Indian default tax rate.
-
-    Parameters
-    ----------
-    ke : float
-        Cost of equity (decimal).
-    market_cap : float
-        Equity value (₹).
-    total_debt : float
-        Gross interest-bearing debt (₹).
-    pre_tax_kd : float, optional
-        Pre-tax cost of debt. Defaults to 8.5% — a reasonable AAA-rated
-        Indian corporate bond yield in the project's reference period.
-    tax_rate : float, optional
-        Effective tax rate used to compute the after-tax cost of debt.
-        Defaults to ``EFFECTIVE_TAX_RATE_IN``.
-
-    Returns
-    -------
-    float
-        Weighted-average cost of capital. Returns ``ke`` when the
-        capital base ``market_cap + total_debt`` is non-positive.
-    """
-    v = market_cap + total_debt
-    if v <= 0:
-        return ke
-    we = market_cap / v
-    wd = total_debt / v
-    return float(we * ke + wd * pre_tax_kd * (1 - tax_rate))
