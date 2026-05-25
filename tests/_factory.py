@@ -77,3 +77,39 @@ def make_bundle(**overrides) -> StockBundle:
     )
     defaults.update(overrides)
     return StockBundle(**defaults)
+
+
+def make_sparse_history_bundle(**overrides) -> StockBundle:
+    """Build a StockBundle with only 1 year of cash-flow history.
+
+    Used to test the boundary behaviour of FCFE applicability and
+    related checks that require ≥3 years of cash-flow data. Empirically
+    no real ticker in the curated NSE universe is genuinely sparse —
+    yfinance backfills pre-IPO data from the RHP, so even Nov-2024
+    listings like SWIGGY.NS return a full 5-year history. The
+    boundary cases this fixture covers therefore have to be tested with
+    a synthetic bundle; there is no naturally-occurring example to lean
+    on.
+    """
+    idx_one = _annual_index(1)
+    sparse_overrides = dict(
+        ticker="SPARSE.NS",
+        name="Recent IPO Co",
+        n_years=1,
+        earnings_annual=pd.Series([18.0], index=idx_one),
+        revenue_annual=pd.Series([20_000e7], index=idx_one),
+        dividends_annual=pd.Series(dtype=float),
+        book_value_annual=pd.Series([60.0], index=idx_one),
+        # Single year of every cash-flow field — below the 3-year
+        # applicability floor downstream consumers will enforce.
+        net_income_annual=pd.Series([1_800e7], index=idx_one),
+        capex_annual=pd.Series([600e7], index=idx_one),
+        dep_amort_annual=pd.Series([400e7], index=idx_one),
+        change_in_wc_annual=pd.Series([200e7], index=idx_one),
+        working_capital_annual=pd.Series([1_500e7], index=idx_one),
+        total_debt_annual=pd.Series([2_000e7], index=idx_one),
+        payout_ratio=0.0,
+        dividend_per_share_ttm=0.0,
+    )
+    sparse_overrides.update(overrides)
+    return make_bundle(**sparse_overrides)

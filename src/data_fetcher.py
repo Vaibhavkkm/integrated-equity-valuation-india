@@ -26,6 +26,25 @@ Design choices worth flagging:
 * **The `StockBundle` dataclass is the single contract** the rest of the
   code consumes. Swapping data providers later (e.g. moving to a paid
   Bloomberg/Refinitiv feed) is a single-file change.
+
+* **Cache schema policy (shim-and-backfill).** When `StockBundle` gains
+  new fields, existing on-disk pickles must keep loading. The policy is:
+
+      1. Bump ``CACHE_SCHEMA_VERSION`` by 1 and document v_old vs v_new
+         in the constant's docstring.
+      2. Add the new field(s) with a sensible default (typically empty
+         ``pd.Series`` for histories, ``np.nan`` for scalars).
+      3. Extend ``StockBundle.__setstate__`` to backfill the new
+         field(s) and stamp ``self._schema_version = CACHE_SCHEMA_VERSION``
+         so the migrated bundle self-reports as up-to-date.
+      4. Add a regression test in ``tests/test_pickle_backcompat.py``
+         covering a synthesised pre-migration pickle.
+
+  This policy *supersedes* the c58b4a7 "wipe caches on schema change"
+  approach, which was reverted in Phase A.0 because it forced every
+  user with accumulated local cache to lose history on upgrade — and
+  there is no migration path back. The shim is ~10 lines per
+  migration; the user cost of the alternative is much higher.
 """
 from __future__ import annotations
 
@@ -147,6 +166,26 @@ _DEFAULT_TTL = timedelta(hours=24)
 
 
 # ---------------------------------------------------------------------------
+# Cache schema versioning
+# ---------------------------------------------------------------------------
+# Increment this when a backward-incompatible change is made to
+# ``StockBundle``. Every bump must be accompanied by a corresponding
+# branch in ``StockBundle.__setstate__`` that backfills the new
+# field(s). See the "Cache schema policy" section of the module
+# docstring for the full procedure.
+#
+# Version history
+# ---------------
+#   v1 — Pre-Phase-A.0 schema. Lacks the six cash-flow series
+#        (net_income_annual, capex_annual, dep_amort_annual,
+#        change_in_wc_annual, working_capital_annual, total_debt_annual).
+#        Most pickles on disk before this commit are v1.
+#   v2 — Phase A.0 schema. Adds the six cash-flow series listed above.
+#        New pickles produced by this module are v2.
+CACHE_SCHEMA_VERSION = 2
+
+
+# ---------------------------------------------------------------------------
 # The single object the rest of the codebase consumes
 # ---------------------------------------------------------------------------
 @dataclass
@@ -195,6 +234,77 @@ class StockBundle:
     # bundles don't need to construct them.
     quarterly_earnings: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
     quarterly_revenue: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+
+    # ------------------------------------------------------------------
+    # Cash-flow & balance-sheet series for FCFE (Phase A.0)
+    # ------------------------------------------------------------------
+    # All series are oldest → newest, indexed by fiscal period end.
+    # Default to empty pd.Series so cached pickles from before this
+    # field-set was added unpickle cleanly (same pattern as the
+    # quarterly_* fields above).
+    #
+    # NB on sign conventions and units: any transform that differs
+    # from the raw upstream provider is applied AT THE FETCHER BOUNDARY
+    # (inside _fetch_from_yahoo) so downstream consumers can read these
+    # fields naturally without worrying about Yahoo's quirks. See the
+    # per-field notes below.
+
+    # Whole-firm net income, annual (₹). yfinance row "Net Income From
+    # Continuing Operations" preferred; falls back to "Net Income".
+    # NOTE: earnings_annual above is per-share EPS — this is the *unit-
+    # of-firm* counterpart used for cash-flow attribution.
+    net_income_annual: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+
+    # Capital expenditure, annual (₹). CONVENTION: stored as the
+    # *absolute value* (positive). yfinance reports CapEx as a negative
+    # cash outflow; we flip the sign at the fetcher boundary so the
+    # natural-language reading ("FY24 CapEx was ₹X") holds. The FCFE
+    # algebra in fcfe_valuation.py reads `NI - CapEx + D&A`, which only
+    # works if CapEx is positive here.
+    capex_annual: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+
+    # Depreciation & amortisation, annual (₹). Positive values (raw
+    # yfinance sign). yfinance row "Depreciation And Amortization" is
+    # the combined D&A series we want; standalone "Depreciation" is the
+    # non-amortisation slice and is not used.
+    dep_amort_annual: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+
+    # Change in working capital, annual (₹). CONVENTION: stored with
+    # the raw yfinance sign — the cash-flow-statement view, where
+    # *positive* = cash was released by a reduction in working-capital
+    # tie-up (favourable to FCFE) and *negative* = cash was absorbed by
+    # a WC build-up.
+    #
+    # Empirically verified (TCS FY24/FY26 and ITC FY24/FY26): adding
+    # this row to NI + D&A + other-non-cash items recovers reported
+    # Operating Cash Flow; subtracting it does not. See
+    # ``scripts/verify_wc_sign.py`` if a future yfinance schema change
+    # warrants re-validation.
+    #
+    # FCFE consequence for Phase A: the Damodaran textbook FCFE formula
+    # reads ``FCFE = NI − Net CapEx(1−DR) − ΔWC(1−DR) + Net Borrowing``
+    # using ΔWC = *increase* in WC (asset-side sign). yfinance's value
+    # is the negative of that, so the formula that consumes THIS field
+    # must read:
+    #
+    #     FCFE = NI − Net CapEx(1−DR) + change_in_wc_annual(1−DR)
+    #            + Net Borrowing
+    #
+    # i.e. ADD the field with its raw sign — do not flip it.
+    change_in_wc_annual: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+
+    # Working-capital snapshot from the balance sheet, annual (₹).
+    # Prefers yfinance's pre-computed "Working Capital" row; falls back
+    # to `Current Assets − Current Liabilities` if that row is missing.
+    # Useful as a sanity check against change_in_wc_annual and for the
+    # 5y average debt-ratio computation in FCFE (Phase A).
+    working_capital_annual: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+
+    # Total debt snapshot from the balance sheet, annual (₹). Positive
+    # values. yfinance "Total Debt" preferred; falls back to the sum of
+    # "Long Term Debt" + "Current Debt" when "Total Debt" is missing.
+    total_debt_annual: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+
     fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     source: str = "yfinance"                    # which provider supplied this
     quality_score: Optional[float] = None       # populated by validate_bundle()
@@ -202,6 +312,65 @@ class StockBundle:
     # Used downstream to detect over-distribution (>100% payout) where the
     # company is funding dividends from debt rather than earnings.
     payout_ratio_raw: float = field(default=float("nan"))
+
+    # Schema version this bundle was built against. Default is 1 (the
+    # pre-Phase-A.0 schema) so pickles whose __dict__ predates this
+    # field self-identify as v1 after unpickle; __post_init__ and
+    # __setstate__ both stamp this to CACHE_SCHEMA_VERSION so any
+    # bundle that has gone through either constructor or migration
+    # ends up reporting the current version. See the module-level
+    # "Cache schema policy" docstring section.
+    _schema_version: int = field(default=1)
+
+    # ------------------------------------------------------------------
+    # Cache-forward compatibility (shim-and-backfill policy)
+    # ------------------------------------------------------------------
+    # Pickle restores objects by populating ``__dict__`` directly — it
+    # does NOT call ``__init__`` and does NOT apply dataclass field
+    # defaults. Any field added to this class after older cache files
+    # were written will be missing on unpickle, raising AttributeError
+    # at runtime even though the dataclass declaration has a default.
+    #
+    # The project-wide policy is to migrate stale pickles forward here
+    # rather than wipe them on schema change — see the "Cache schema
+    # policy" section of the module docstring for the full procedure.
+    # This supersedes the c58b4a7 "wipe-on-change" decision, which was
+    # reverted in Phase A.0 because forcing every user to lose their
+    # local cache on upgrade is a worse user experience than carrying
+    # ~10 lines of migration code per schema bump.
+    #
+    # When CACHE_SCHEMA_VERSION is bumped, add a new branch below that
+    # backfills the new field(s). The final ``self._schema_version``
+    # assignment stamps the migrated bundle as current.
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+
+        # --- v1 → v2 backfill ------------------------------------------
+        # Older fields (quarterly_* added in the earnings-momentum
+        # migration, payout_ratio_raw added in the
+        # unsustainable-payout-guard migration; both predate v1 but
+        # the formal version field, so we backfill them here too).
+        for name in ("quarterly_earnings", "quarterly_revenue"):
+            cur = getattr(self, name, None)
+            if cur is None or not isinstance(cur, pd.Series):
+                setattr(self, name, pd.Series(dtype=float))
+        if not hasattr(self, "payout_ratio_raw"):
+            self.payout_ratio_raw = float("nan")
+        # Phase A.0 cash-flow / balance-sheet series — the actual v1→v2
+        # delta.
+        for name in (
+            "net_income_annual", "capex_annual", "dep_amort_annual",
+            "change_in_wc_annual", "working_capital_annual", "total_debt_annual",
+        ):
+            cur = getattr(self, name, None)
+            if cur is None or not isinstance(cur, pd.Series):
+                setattr(self, name, pd.Series(dtype=float))
+
+        # Stamp the migrated bundle with the current schema version.
+        # New (freshly-constructed via __init__) bundles also pass
+        # through this assignment via __post_init__ below; both code
+        # paths converge on CACHE_SCHEMA_VERSION.
+        self._schema_version = CACHE_SCHEMA_VERSION
 
     # Convenience
     def __post_init__(self):
@@ -222,6 +391,13 @@ class StockBundle:
             self.payout_ratio = 1.0
         if self.payout_ratio is not None and self.payout_ratio < 0:
             self.payout_ratio = 0.0
+
+        # Stamp every freshly-constructed bundle with the current schema
+        # version. Pickles whose __dict__ already contains a stale
+        # _schema_version are upgraded by __setstate__ at unpickle time;
+        # this assignment handles the live-fetch path. Both routes
+        # converge on CACHE_SCHEMA_VERSION.
+        self._schema_version = CACHE_SCHEMA_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -462,6 +638,7 @@ def _fetch_from_yahoo(ticker: str, sector: Optional[str]) -> StockBundle:
 
         income_stmt = _safe_statement(yticker, "income_stmt")
         balance_sheet = _safe_statement(yticker, "balance_sheet")
+        cashflow_stmt = _safe_statement(yticker, "cashflow")
         quarterly_income_stmt = _safe_statement(yticker, "quarterly_income_stmt")
         dividends = yticker.dividends if hasattr(yticker, "dividends") else pd.Series(dtype=float)
 
@@ -509,6 +686,90 @@ def _fetch_from_yahoo(ticker: str, sector: Optional[str]) -> StockBundle:
     book_equity_annual = _annual_series(balance_sheet, "Stockholders Equity", "Total Equity Gross Minority Interest")
     total_debt_series = _annual_series(balance_sheet, "Total Debt", "Long Term Debt")
     cash_series = _annual_series(balance_sheet, "Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments")
+
+    # ------------------------------------------------------------------
+    # Cash-flow & working-capital series for FCFE (Phase A.0).
+    # All transforms that diverge from the raw provider are applied
+    # here so consumers see naturally-signed values. See field-level
+    # docstrings on StockBundle for the conventions.
+    # ------------------------------------------------------------------
+    capex_annual_raw = _annual_series(
+        cashflow_stmt,
+        "Capital Expenditure",
+        "Capital Expenditure Reported",
+        "Purchase Of PPE",
+    )
+    # yfinance reports CapEx as a negative cash outflow; flip the sign
+    # at the boundary so downstream FCFE math reads naturally.
+    capex_annual = capex_annual_raw.abs() if not capex_annual_raw.empty else capex_annual_raw
+
+    dep_amort_annual = _annual_series(
+        cashflow_stmt,
+        "Depreciation And Amortization",
+        "Depreciation Amortization Depletion",
+    )
+
+    change_in_wc_annual = _annual_series(
+        cashflow_stmt,
+        "Change In Working Capital",
+        "Changes In Working Capital",
+    )
+
+    net_income_annual_full = _annual_series(
+        cashflow_stmt,
+        "Net Income From Continuing Operations",
+        "Net Income",
+        "Net Income Common Stockholders",
+    )
+    # Fallback: if the cashflow statement lacks an NI row, derive from
+    # the income statement (which we already parsed earlier into a
+    # *per-share* series for EPS; here we go back to the raw whole-firm
+    # statement so we have a directly comparable ₹-denominated series).
+    if net_income_annual_full.empty:
+        net_income_annual_full = _annual_series(
+            income_stmt, "Net Income", "Net Income Common Stockholders",
+        )
+
+    # Working-capital snapshot. Pass exact labels first so the
+    # _first_present() exact-match pass picks "Current Assets" before
+    # the substring fallback would erroneously match "Other Current
+    # Assets" / "Total Non Current Assets".
+    working_capital_annual = _annual_series(balance_sheet, "Working Capital")
+    if working_capital_annual.empty:
+        ca = _annual_series(balance_sheet, "Current Assets", "Total Current Assets")
+        cl = _annual_series(balance_sheet, "Current Liabilities", "Total Current Liabilities")
+        if not ca.empty and not cl.empty:
+            # Align on intersection so a single missing year doesn't
+            # silently drop the whole series.
+            common = ca.index.intersection(cl.index)
+            if len(common) > 0:
+                working_capital_annual = ca.loc[common] - cl.loc[common]
+
+    # Total debt history. yfinance "Total Debt" preferred; reconstruct
+    # from long-term + current debt rows when that row is unavailable
+    # (banks and a few NBFCs in the universe sometimes lack the
+    # combined row).
+    total_debt_annual = _annual_series(balance_sheet, "Total Debt")
+    if total_debt_annual.empty:
+        ltd = _annual_series(balance_sheet, "Long Term Debt", "Long Term Debt And Capital Lease Obligation")
+        std = _annual_series(balance_sheet, "Current Debt", "Current Debt And Capital Lease Obligation", "Short Term Debt")
+        if not ltd.empty or not std.empty:
+            # Sum on union of indices, treating missing as 0 — better
+            # than dropping a year that only has one of the two.
+            idx = ltd.index.union(std.index)
+            total_debt_annual = (
+                ltd.reindex(idx, fill_value=0.0)
+                + std.reindex(idx, fill_value=0.0)
+            )
+
+    if log.isEnabledFor(10):  # DEBUG
+        log.debug(
+            "cashflow fields for %s: capex=%d, dep_amort=%d, ΔWC=%d, "
+            "NI=%d, WC=%d, total_debt=%d",
+            ticker, len(capex_annual), len(dep_amort_annual),
+            len(change_in_wc_annual), len(net_income_annual_full),
+            len(working_capital_annual), len(total_debt_annual),
+        )
 
     # Dividends as annual sums (Yahoo gives ex-date payments)
     if not dividends.empty:
@@ -659,6 +920,12 @@ def _fetch_from_yahoo(ticker: str, sector: Optional[str]) -> StockBundle:
         enterprise_value=enterprise_value,
         quarterly_earnings=quarterly_earnings,
         quarterly_revenue=quarterly_revenue,
+        net_income_annual=net_income_annual_full,
+        capex_annual=capex_annual,
+        dep_amort_annual=dep_amort_annual,
+        change_in_wc_annual=change_in_wc_annual,
+        working_capital_annual=working_capital_annual,
+        total_debt_annual=total_debt_annual,
         source="yfinance",
     )
 
