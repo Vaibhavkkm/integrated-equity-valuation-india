@@ -81,20 +81,41 @@ def _apply_dark_theme(fig: go.Figure, *, height: int = 460,
 
 # ---------------------------------------------------------------------------
 def valuation_bar_chart(result: ValuationResult) -> go.Figure:
-    """Side-by-side bars: current price, DDM, Relative, Blended, MC band."""
-    labels = ["Current Price", "DDM", "Relative", "Blended"]
+    """Side-by-side bars: current price, DDM, [FCFE], Relative, Blended.
+
+    FCFE bar is shown only when ``result.fcfe.valid`` — the Phase A spec
+    explicitly forbids rendering a ₹0 bar for non-applicable cases
+    because users misread "no bar" as "no data" rather than the
+    correct "model not applicable". The MC whisker always sits on
+    the Blended bar (last position); its x-index depends on whether
+    FCFE was added.
+    """
+    rec_color = (_BUY if result.recommendation == "BUY" else
+                 _SELL if result.recommendation == "SELL" else _HOLD)
+    # _FCFE bar colour — slot between DDM (PRIMARY_DK) and Relative
+    # (PRIMARY) on the palette so the three intrinsic-value bars read
+    # as a related family.
+    _FCFE_COLOR = "#22d3ee"  # cyan accent used elsewhere in the theme
+    _FCFE_LINE = "#67e8f9"
+
+    labels = ["Current Price", "DDM"]
     values = [
         result.target.price,
         result.ddm.value_per_share if result.ddm.valid else None,
-        result.relative.weighted_value,
-        result.blended_value,
     ]
-    rec_color = (_BUY if result.recommendation == "BUY" else
-                 _SELL if result.recommendation == "SELL" else _HOLD)
-    colors = [_GREY, _PRIMARY_DK, _PRIMARY, rec_color]
+    colors = [_GREY, _PRIMARY_DK]
+    line_colors = ["#94a3b8", "#60a5fa"]
 
-    # Glow line on top of every bar
-    line_colors = ["#94a3b8", "#60a5fa", "#7dd3fc", rec_color]
+    if result.fcfe.valid:
+        labels.append("FCFE")
+        values.append(result.fcfe.value_per_share)
+        colors.append(_FCFE_COLOR)
+        line_colors.append(_FCFE_LINE)
+
+    labels += ["Relative", "Blended"]
+    values += [result.relative.weighted_value, result.blended_value]
+    colors += [_PRIMARY, rec_color]
+    line_colors += ["#7dd3fc", rec_color]
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
@@ -115,26 +136,28 @@ def valuation_bar_chart(result: ValuationResult) -> go.Figure:
     top_candidates = finite_vals + ([mc.p90] if np.isfinite(mc.p90) else [])
     y_max = max(top_candidates) * 1.18 if top_candidates else 1
 
-    # Monte Carlo P10–P90 band overlay on Blended
+    # Monte Carlo P10–P90 band overlay on the Blended bar (last index).
+    blended_idx = len(labels) - 1
     if np.isfinite(mc.p10):
         fig.add_shape(
-            type="line", x0=3, x1=3,
+            type="line", x0=blended_idx, x1=blended_idx,
             y0=mc.p10, y1=mc.p90,
             line=dict(color=_TEXT, width=2),
         )
-        # Caps at top and bottom of the whisker
-        for y, dy in [(mc.p90, 0), (mc.p10, 0)]:
+        for y in (mc.p90, mc.p10):
             fig.add_shape(
-                type="line", x0=2.92, x1=3.08, y0=y, y1=y,
+                type="line",
+                x0=blended_idx - 0.08, x1=blended_idx + 0.08,
+                y0=y, y1=y,
                 line=dict(color=_TEXT, width=2),
             )
         fig.add_annotation(
-            x=3, y=mc.p90, text=f"P90  ₹{mc.p90:,.0f}",
+            x=blended_idx, y=mc.p90, text=f"P90  ₹{mc.p90:,.0f}",
             showarrow=False, yshift=14,
             font=dict(size=11, color=_MUTED, family=_FONT["family"]),
         )
         fig.add_annotation(
-            x=3, y=mc.p10, text=f"P10  ₹{mc.p10:,.0f}",
+            x=blended_idx, y=mc.p10, text=f"P10  ₹{mc.p10:,.0f}",
             showarrow=False, yshift=-14,
             font=dict(size=11, color=_MUTED, family=_FONT["family"]),
         )

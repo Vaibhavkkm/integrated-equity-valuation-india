@@ -176,21 +176,51 @@ def generate_pdf(result: "ValuationResult") -> Path:
                            s[rec_style]))
     story.append(Spacer(1, 0.4*cm))
 
-    summary_tbl = Table([
+    # Branch tag for the recommendation row — surfaces which leg of the
+    # three-way blend carried the call.
+    branch_tag = {
+        "two_way_fallback": "Two-way blend (DDM + Rel)",
+        "fcfe_low_payout": "Three-way, FCFE-leaning",
+        "fcfe_mid_payout": "Three-way, balanced",
+        "fcfe_high_payout": "Three-way, Rel-leaning",
+        "fcfe_ddm_invalid_low_payout": "FCFE + Rel (DDM skipped, low payout)",
+        "fcfe_ddm_invalid_mid_payout": "FCFE + Rel (DDM skipped, mid payout)",
+        "fcfe_ddm_invalid_high_payout": "FCFE + Rel (DDM skipped, high payout)",
+    }.get(getattr(result, "blend_branch", "two_way_fallback"), "Two-way blend")
+
+    if getattr(result, "fcfe", None) is not None and result.fcfe.valid:
+        blend_note = (
+            f"DDM {result.weight_ddm:.0%} / FCFE {result.weight_fcfe:.0%} / "
+            f"Rel {result.weight_relative:.0%} — {branch_tag}"
+        )
+    else:
+        blend_note = (
+            f"DDM {result.weight_ddm:.0%} / Rel {result.weight_relative:.0%} — "
+            f"{branch_tag}"
+        )
+
+    summary_rows = [
         ["Metric", "Value", "Notes"],
         ["Current Market Price", _money(result.target.price), "Last close (NSE)"],
         ["DDM Intrinsic Value", _money(result.ddm.value_per_share)
          if result.ddm.valid else "Not applicable", result.ddm.model],
+    ]
+    if getattr(result, "fcfe", None) is not None and result.fcfe.valid:
+        summary_rows.append([
+            "FCFE Intrinsic Value", _money(result.fcfe.value_per_share),
+            "Two-stage FCFE",
+        ])
+    summary_rows += [
         ["Relative Intrinsic Value", _money(result.relative.weighted_value),
          "Multi-multiple weighted"],
-        ["Blended Intrinsic Value", _money(result.blended_value),
-         f"DDM {result.weight_ddm:.0%} / Rel {result.weight_relative:.0%}"],
+        ["Blended Intrinsic Value", _money(result.blended_value), blend_note],
         ["Cost of Equity (Ke)", _pct(result.coe.ke), result.coe.method],
         ["Quality Composite (0-100)", f"{result.quality.composite:.1f}",
          f"F={result.quality.piotroski_f}/9, DQ={result.quality.dividend_quality}/10"],
         ["Monte Carlo Median", _money(result.monte_carlo.p50),
          f"P10 {_money(result.monte_carlo.p10)} – P90 {_money(result.monte_carlo.p90)}"],
-    ], colWidths=[5*cm, 4*cm, 7.5*cm])
+    ]
+    summary_tbl = Table(summary_rows, colWidths=[5*cm, 4*cm, 7.5*cm])
     summary_tbl.setStyle(_table_style())
     story.append(summary_tbl)
 
@@ -251,10 +281,35 @@ def generate_pdf(result: "ValuationResult") -> Path:
             f"DDM not applicable — {result.ddm.note}",
             s["Body"]))
 
+    # --- FCFE (Phase A) — only when applicable ---
+    fcfe = getattr(result, "fcfe", None)
+    if fcfe is not None and fcfe.valid:
+        story.append(Spacer(1, 0.4*cm))
+        story.append(Paragraph("5. Free Cash Flow to Equity (FCFE)", s["H2"]))
+        story.append(Paragraph(
+            "Two-stage FCFE valuation: explicit forecast for "
+            f"{fcfe.inputs['stage1_years']} years with a linear growth taper "
+            "in the final 2 years, then a Gordon perpetuity at terminal "
+            "growth. Adds a third leg to the blended intrinsic value for "
+            "firms whose DDM cannot price retained-and-reinvested cash.",
+            s["Body"]))
+        fcfe_rows = [["Input", "Value"]]
+        for k, v in fcfe.inputs.items():
+            if isinstance(v, float):
+                fcfe_rows.append([k, f"{v:,.4f}"])
+            else:
+                fcfe_rows.append([k, str(v)])
+        fcfe_rows.append(["FCFE Intrinsic Value (per share)",
+                          _money(fcfe.value_per_share)])
+        fcfe_tbl = Table(fcfe_rows, colWidths=[8*cm, 6*cm])
+        fcfe_tbl.setStyle(_table_style())
+        story.append(fcfe_tbl)
+
     story.append(PageBreak())
 
     # --- Relative valuation ---
-    story.append(Paragraph("5. Relative Valuation", s["H2"]))
+    section_num = "6." if (fcfe is not None and fcfe.valid) else "5."
+    story.append(Paragraph(f"{section_num} Relative Valuation", s["H2"]))
     story.append(Paragraph(
         f"Peer set ({len(result.peer_set.peers)} firms) — "
         f"selection method: <i>{result.peer_set.method}</i>", s["Body"]))
@@ -276,7 +331,8 @@ def generate_pdf(result: "ValuationResult") -> Path:
 
     # --- Quality ---
     story.append(Spacer(1, 0.4*cm))
-    story.append(Paragraph("6. Quality Diagnostics", s["H2"]))
+    q_num = "7." if (fcfe is not None and fcfe.valid) else "6."
+    story.append(Paragraph(f"{q_num} Quality Diagnostics", s["H2"]))
     q_tbl = Table([
         ["Metric", "Value", "Interpretation"],
         ["Piotroski F-Score", f"{result.quality.piotroski_f}/9",
@@ -292,7 +348,8 @@ def generate_pdf(result: "ValuationResult") -> Path:
 
     # --- Monte Carlo + tornado ---
     story.append(Spacer(1, 0.4*cm))
-    story.append(Paragraph("7. Risk & Sensitivity", s["H2"]))
+    rs_num = "8." if (fcfe is not None and fcfe.valid) else "7."
+    story.append(Paragraph(f"{rs_num} Risk & Sensitivity", s["H2"]))
     mc = result.monte_carlo
     story.append(Paragraph(
         f"<b>Monte Carlo</b> (10,000 paths) — Mean ₹{mc.mean:,.0f}, "
@@ -311,7 +368,8 @@ def generate_pdf(result: "ValuationResult") -> Path:
 
     # --- Disclaimer ---
     story.append(Spacer(1, 0.6*cm))
-    story.append(Paragraph("8. Disclaimer", s["H2"]))
+    disc_num = "9." if (fcfe is not None and fcfe.valid) else "8."
+    story.append(Paragraph(f"{disc_num} Disclaimer", s["H2"]))
     story.append(Paragraph(
         "This report has been prepared for academic purposes as part of a "
         "Semester IV student project under the supervision of "

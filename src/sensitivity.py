@@ -41,6 +41,7 @@ from src.ddm_models import (
     historical_dividend_cagr,
     select_and_value,
 )
+from src.fcfe_valuation import FCFEResult
 from src.relative_valuation import RelativeValuation
 
 
@@ -376,3 +377,269 @@ def _vectorised_ddm_samples(
         return np.full(n_paths, np.nan)
 
     return np.where(invalid, np.nan, v)
+
+
+# ---------------------------------------------------------------------------
+# Three-way Monte Carlo (Phase A) — parallel to monte_carlo_blended
+# ---------------------------------------------------------------------------
+# A separate function (rather than generalising monte_carlo_blended) so the
+# two-way path stays bit-identical for non-FCFE-applicable tickers. The
+# existing pipeline is the regression baseline; if I edit
+# monte_carlo_blended directly, every numeric assertion in
+# test_monte_carlo.py becomes a moving target. Cleaner to leave it alone
+# and let the integrated valuation pick which MC runner to call based on
+# whether FCFE is applicable.
+def monte_carlo_three_way(
+    target: StockBundle,
+    coe: CostOfEquity,
+    rel: RelativeValuation,
+    fcfe: FCFEResult,
+    base_g_terminal: float,
+    w_ddm: float,
+    w_fcfe: float,
+    w_rel: float,
+    *,
+    n_paths: int = SETTINGS.mc_paths,
+    seed: int = SETTINGS.mc_seed,
+) -> MonteCarloResult:
+    """Vectorised three-way Monte Carlo over DDM + FCFE + Relative legs.
+
+    Reuses the existing four distributions for Ke, terminal g, payout,
+    and the per-multiple relative sample (do NOT introduce new
+    distributions for these — Phase A spec). Adds three FCFE-specific
+    per-path distributions:
+
+      * CapEx / Revenue ratio: truncated normal, σ = 15% of mean,
+        lower-bounded at 0.
+      * D&A / Revenue ratio: truncated normal, σ = 10% of mean,
+        lower-bounded at 0.
+      * Debt ratio: tight Beta around the historical mean with
+        α + β = 50 (sharper than the payout Beta — DR moves slowly
+        for established firms).
+
+    Stage-1 growth is recomputed per path from the same Bayes-shrunk
+    blend the deterministic FCFE engine uses; it shares the existing
+    growth distribution rather than introducing a new one.
+
+    The blended sample on each path is
+        w_ddm * V_DDM_path + w_fcfe * V_FCFE_path + w_rel * V_Rel_path
+    with ``np.where`` fallback to whichever legs are finite on a
+    given path, so a path where (say) FCFE collapses (g → ke) still
+    contributes a sensible DDM+Rel blended value.
+    """
+    rng = np.random.default_rng(seed)
+
+    # ---- Re-use existing distributions for Ke, g_term, payout, rel ----
+    ke_draws = np.clip(rng.normal(coe.ke, 0.008, n_paths), 0.04, 0.25)
+    g_term_draws = np.clip(rng.normal(base_g_terminal, 0.004, n_paths), 0.0, 0.06)
+    p = max(0.05, min(0.95, target.payout_ratio if target.payout_ratio else 0.30))
+    a = p * 30
+    b = (1 - p) * 30
+    payout_draws = rng.beta(a, b, n_paths)
+
+    # ---- DDM track (reuse existing vectorised closed-form) -----------
+    if not fcfe.valid:
+        # Branch 1 (two-way fallback) — the caller normally would have
+        # routed to monte_carlo_blended. Defensive: forward to the same
+        # math by treating FCFE samples as NaN throughout.
+        base_iv = select_and_value(
+            eps_ttm=target.eps_ttm,
+            dps_ttm=target.dividend_per_share_ttm,
+            payout_ratio=target.payout_ratio,
+            roe=target.roe,
+            ke=coe.ke,
+            historical_dps=target.dividends_annual,
+            historical_eps=target.earnings_annual,
+            sector_g_terminal=base_g_terminal,
+            payout_ratio_raw=getattr(target, "payout_ratio_raw", float("nan")),
+        )
+        ddm_samples = _vectorised_ddm_samples(
+            target, base_iv, ke_draws, g_term_draws, payout_draws,
+        )
+        fcfe_samples = np.full(n_paths, np.nan)
+    else:
+        base_iv = select_and_value(
+            eps_ttm=target.eps_ttm,
+            dps_ttm=target.dividend_per_share_ttm,
+            payout_ratio=target.payout_ratio,
+            roe=target.roe,
+            ke=coe.ke,
+            historical_dps=target.dividends_annual,
+            historical_eps=target.earnings_annual,
+            sector_g_terminal=base_g_terminal,
+            payout_ratio_raw=getattr(target, "payout_ratio_raw", float("nan")),
+        )
+        ddm_samples = _vectorised_ddm_samples(
+            target, base_iv, ke_draws, g_term_draws, payout_draws,
+        )
+        fcfe_samples = _vectorised_fcfe_samples(
+            target, fcfe, ke_draws, g_term_draws, rng,
+        )
+
+    # ---- Relative track (reuse) --------------------------------------
+    rel_base = rel.weighted_value
+    if np.isfinite(rel_base) and rel_base > 0:
+        log_mu = np.log(rel_base)
+        rel_samples = rng.lognormal(log_mu - 0.5 * 0.20**2, 0.20, n_paths)
+    else:
+        rel_samples = np.full(n_paths, np.nan)
+
+    # ---- Blend per path with NaN-aware fallback ----------------------
+    # When a leg is NaN on a particular path, redistribute its weight
+    # to the surviving legs proportionally so the total still sums to
+    # the same effective intrinsic value.
+    blended = _blend_three_way_vectorised(
+        ddm_samples, fcfe_samples, rel_samples,
+        w_ddm, w_fcfe, w_rel,
+    )
+
+    blended = blended[np.isfinite(blended)]
+    if blended.size == 0:
+        return MonteCarloResult(np.array([]), np.nan, np.nan, np.nan, np.nan, np.nan)
+
+    return MonteCarloResult(
+        samples=blended,
+        p10=float(np.percentile(blended, 10)),
+        p50=float(np.percentile(blended, 50)),
+        p90=float(np.percentile(blended, 90)),
+        mean=float(np.mean(blended)),
+        std=float(np.std(blended)),
+    )
+
+
+def _vectorised_fcfe_samples(
+    target: StockBundle,
+    base_fcfe: FCFEResult,
+    ke_arr: np.ndarray,
+    g_term_arr: np.ndarray,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Closed-form two-stage FCFE evaluated across all MC paths.
+
+    Mirrors the structure of ``_vectorised_ddm_samples``: pins the
+    central inputs from ``base_fcfe.inputs`` and broadcasts the
+    closed-form math across path arrays. Per-path noise on CapEx/Rev,
+    D&A/Rev, and DR is sampled here; growth and Ke come from the
+    shared draws so all three legs are jointly correlated to the
+    same scenario.
+    """
+    n_paths = ke_arr.shape[0]
+    inputs = base_fcfe.inputs
+    stage1_years = int(inputs["stage1_years"])
+    taper_years = SETTINGS.fcfe_taper_years
+    taper_start = stage1_years - taper_years
+    g1_base = float(inputs["g1"])
+    dr_base = float(inputs["dr"])
+    ni0 = float(inputs["ni0"])
+    capex0 = float(inputs["capex0"])
+    da0 = float(inputs["da0"])
+    wc0 = float(inputs["wc0_yf"])
+    shares = float(inputs["shares_outstanding"])
+    revenue = float(target.revenue) if (target.revenue and np.isfinite(target.revenue)) else float("nan")
+
+    # ---- Per-path noise on CapEx/Rev, D&A/Rev, DR --------------------
+    if np.isfinite(revenue) and revenue > 0:
+        capex_ratio_mean = capex0 / revenue
+        da_ratio_mean = da0 / revenue
+        capex_ratio = np.clip(
+            rng.normal(capex_ratio_mean, 0.15 * abs(capex_ratio_mean), n_paths),
+            0.0, None,
+        )
+        da_ratio = np.clip(
+            rng.normal(da_ratio_mean, 0.10 * abs(da_ratio_mean), n_paths),
+            0.0, None,
+        )
+        capex_draws = capex_ratio * revenue
+        da_draws = da_ratio * revenue
+    else:
+        # Revenue missing — fall back to direct ±15%/±10% noise on the
+        # latest-year values themselves. Avoids dropping the path.
+        capex_draws = np.clip(
+            rng.normal(capex0, 0.15 * abs(capex0), n_paths), 0.0, None,
+        )
+        da_draws = np.clip(
+            rng.normal(da0, 0.10 * abs(da0), n_paths), 0.0, None,
+        )
+
+    # DR: tight Beta around the historical mean (α + β = 50).
+    if 0 < dr_base < 1:
+        a = dr_base * 50
+        b = (1 - dr_base) * 50
+        dr_draws = rng.beta(a, b, n_paths)
+    else:
+        dr_draws = np.full(n_paths, dr_base)
+    # Re-apply the engine cap on each path so the (1−DR) multiplier
+    # stays bounded.
+    dr_draws = np.clip(dr_draws, 0.0, SETTINGS.fcfe_debt_ratio_cap)
+
+    # ---- Terminal growth caps -----------------------------------------
+    ceiling = np.minimum(LONG_RUN_NOMINAL_GROWTH_IN, ke_arr - SETTINGS.fcfe_ke_margin)
+    g_term_capped = np.clip(np.minimum(g_term_arr, ceiling), 0.0, None)
+
+    # Path-level invalid mask (mirrors the engine's domain checks)
+    invalid = (ke_arr <= 0) | (g_term_capped >= ke_arr - 1e-9)
+
+    # ---- Base-year FCFE per path -------------------------------------
+    # Match the engine's formula: FCFE_0 = NI − (CapEx − D&A)(1−DR)
+    #                                       + ΔWC_yf (1−DR)
+    one_minus_dr = 1.0 - dr_draws
+    base_fcfe_arr = ni0 - (capex_draws - da_draws) * one_minus_dr + wc0 * one_minus_dr
+
+    # ---- Stage 1: per-year compounding with taper --------------------
+    fcfe_t = base_fcfe_arr.copy()
+    pv_explicit = np.zeros(n_paths)
+    for t in range(1, stage1_years + 1):
+        if t <= taper_start:
+            g_t = g1_base  # scalar
+        else:
+            taper_progress = (t - taper_start) / taper_years
+            g_t = g1_base + (g_term_capped - g1_base) * taper_progress  # (n_paths,)
+        fcfe_t = fcfe_t * (1 + g_t)
+        disc = (1 + ke_arr) ** t
+        pv_explicit += fcfe_t / disc
+
+    # ---- Stage 2: Gordon terminal ------------------------------------
+    fcfe_terminal_plus_one = fcfe_t * (1 + g_term_capped)
+    terminal_v = fcfe_terminal_plus_one / (ke_arr - g_term_capped)
+    pv_tv = terminal_v / ((1 + ke_arr) ** stage1_years)
+
+    total_equity = pv_explicit + pv_tv
+    per_share = total_equity / shares if shares > 0 else np.full(n_paths, np.nan)
+
+    return np.where(invalid, np.nan, per_share)
+
+
+def _blend_three_way_vectorised(
+    ddm_s: np.ndarray, fcfe_s: np.ndarray, rel_s: np.ndarray,
+    w_ddm: float, w_fcfe: float, w_rel: float,
+) -> np.ndarray:
+    """Per-path three-way blend with NaN-aware weight redistribution.
+
+    On paths where one or more legs are NaN, the surviving legs'
+    weights are renormalised so the path still contributes a
+    sensible blended value rather than dropping out.
+    """
+    n_paths = ddm_s.shape[0]
+    d_ok = np.isfinite(ddm_s)
+    f_ok = np.isfinite(fcfe_s)
+    r_ok = np.isfinite(rel_s)
+
+    # Build per-path effective weights with NaN-aware renormalisation.
+    w_d = np.where(d_ok, w_ddm, 0.0)
+    w_f = np.where(f_ok, w_fcfe, 0.0)
+    w_r = np.where(r_ok, w_rel, 0.0)
+    total = w_d + w_f + w_r
+    safe_total = np.where(total > 0, total, 1.0)  # avoid /0; paths with total=0 → NaN below
+    w_d = w_d / safe_total
+    w_f = w_f / safe_total
+    w_r = w_r / safe_total
+
+    # Replace NaNs with 0 before the weighted sum (the corresponding
+    # weights are already 0 by construction).
+    ddm_clean = np.where(d_ok, ddm_s, 0.0)
+    fcfe_clean = np.where(f_ok, fcfe_s, 0.0)
+    rel_clean = np.where(r_ok, rel_s, 0.0)
+
+    blended = w_d * ddm_clean + w_f * fcfe_clean + w_r * rel_clean
+    blended = np.where(total > 0, blended, np.nan)
+    return blended

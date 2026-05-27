@@ -28,7 +28,7 @@
 >
 > Full terms: **[LICENSE](./LICENSE)**.
 >
-> *Author: Vaibhav Mangroliya · Supervisor: Mr. Senthil Nagarajan · 2026.*
+> *Author: Vaibhav Mangroliya · Supervisor: Dr. Senthil Murugan NAGARAJAN · 2026.*
 
 ---
 
@@ -36,10 +36,11 @@
 
 Most equity valuation projects stop at one of two things: a textbook
 Dividend Discount Model, or a peer-comparison spreadsheet. This one
-runs **both tracks side-by-side**, blends them with weights that *adapt
-per stock*, stress-tests the answer with a 10,000-path Monte Carlo,
-solves the **reverse problem** (what growth is the market pricing in?),
-and grades its own historical recommendations against forward returns.
+runs **three intrinsic-value tracks side-by-side** (DDM, FCFE, and
+relative-multiples), blends them with weights that *adapt per stock*,
+stress-tests the answer with a 10,000-path Monte Carlo, solves the
+**reverse problem** (what growth is the market pricing in?), and grades
+its own historical recommendations against forward returns.
 
 In one diagram:
 
@@ -51,32 +52,38 @@ In one diagram:
  │  fetch + validate  │──► data quality 0-100 (gates the rest)
  └─────────┬──────────┘
            │
-   ┌───────┴────────┐
-   ▼                ▼
- DDM track     Relative track
- (4 variants,  (P/E, P/B, P/S,
-  auto-picked) EV/EBITDA, PEG;
-   ▼          peers via K-Means
- Bayes-shrunk + Mahalanobis)
- growth        ▼
-   ▼          sector-aware
- intrinsic    multiple weights
- value        ▼
-   │          implied price
-   └────┬─────┘
-        ▼
-   credibility-weighted blend
-   (tilt ±15 pp from 50/50 by
-    dividend quality + earnings
-    track length)
-        ▼
-   Monte Carlo (10k paths)
-        ▼
+   ┌───────┼──────────────┐
+   ▼       ▼              ▼
+ DDM      FCFE        Relative
+ track    track       track
+ (4       (two-       (P/E, P/B,
+  variants, stage      P/S, EV/EBITDA,
+  auto-     w/ growth  PEG; peers via
+  picked)   taper +    K-Means +
+   ▼        Gordon     Mahalanobis)
+ Bayes-     terminal)   ▼
+ shrunk     ▼          sector-aware
+ growth     reuses     multiple weights
+   ▼        same Ke     ▼
+ intrinsic  + Bayes-    implied
+ value      shrunk g    price
+   │        ▼            │
+   │     intrinsic       │
+   │     value           │
+   │        │            │
+   └────────┼────────────┘
+            ▼
+   credibility-weighted three-way blend
+   (legacy ±15/−45 pp tilt sets w_ddm;
+    remainder splits FCFE/Rel by payout)
+            ▼
+   Monte Carlo (10k paths, vectorised)
+            ▼
    reverse DCF — implied growth
-        ▼
+            ▼
    BUY / HOLD / SELL
    + HIGH / MEDIUM / LOW confidence
-        ▼
+            ▼
    PDF report + backtest log
 ```
 
@@ -98,9 +105,9 @@ BUY/SELL calls have predictive value.
 
 ## What's actually inside
 
-### 1. Two valuation tracks, four DDM flavors
+### 1. Three valuation tracks
 
-The DDM module auto-picks one of:
+The DDM module auto-picks one of four variants:
 
 | Variant | When it's chosen |
 |---|---|
@@ -109,11 +116,33 @@ The DDM module auto-picks one of:
 | **H-Model** (Fuller & Hsia, 1984) | Fast-growing payer — growth declines linearly, no cliff |
 | **Three-Stage** | Mid-cycle firm; explicit high → linear fade → stable terminal |
 
-The relative track computes five multiples — **P/E, P/B, P/S, EV/EBITDA,
-PEG** — aggregates each with a **trimmed harmonic mean** (multiples are
-ratios; arithmetic averaging biases them upward), then combines them
-using **sector-aware weights** (P/B carries 50% for banks; EV/EBITDA is
-zero for banks but 50% for cement).
+The **FCFE** (Free Cash Flow to Equity) track was added because the four
+DDM variants all discount dividends — and for an ultra-low-payout
+reinvester like SIEMENS (payout ~0.3%), the dividend stream is tiny in
+absolute terms regardless of growth fade. FCFE values the cash flow
+actually available to equity holders after CapEx, working-capital
+investment, and net borrowing, and is the right intrinsic measure for
+firms that retain and redeploy most of their earnings.
+
+```
+FCFE_t = NI_t − (CapEx_t − D&A_t)(1 − DR) + ΔWC_yf_t (1 − DR)
+```
+
+where `DR` is the 5-year average D/(D+E) (capped at 60%), `ΔWC_yf` is
+yfinance's cash-flow-statement-view working-capital change (positive =
+cash freed by WC reduction — empirically verified against TCS FY24 NI
+₹46,099 cr matching the published annual report), and the engine uses a
+two-stage closed form: 7-year explicit forecast with a linear growth
+taper in the final 2 years, then a Gordon perpetuity. **FCFE does not
+apply to financials (Banking, NBFC, Insurance) — they use FCFF or
+regulated-capital DDM — and is gated at the model layer regardless of
+whether the cash-flow data populates.**
+
+The **relative** track computes five multiples — **P/E, P/B, P/S,
+EV/EBITDA, PEG** — aggregates each with a **trimmed harmonic mean**
+(multiples are ratios; arithmetic averaging biases them upward), then
+combines them using **sector-aware weights** (P/B carries 50% for banks;
+EV/EBITDA is zero for banks but 50% for cement).
 
 ### 2. Smarter peers than "same sector"
 
@@ -138,13 +167,42 @@ Four checks run before the blend:
 
 These fold into a 0-100 composite (weights 30/25/25/20) that *modulates
 the blend weight*. A stock with a 9-year clean dividend record gets DDM
-bumped up. A non-payer gets DDM zeroed out and pure relative valuation.
-The tilt is **asymmetric on purpose**: up to **+15 pp** toward DDM (for
-mature payers with strong track records), and up to **−40 pp** away from
-DDM (because the DDM mechanically under-prices low-payout retainers, so
-when the two tracks disagree sharply for a reinvestor like an IT name,
-the relative track has to carry more weight). The default for a typical
-50/50 candidate stays exactly 50/50.
+bumped up. A non-payer gets DDM zeroed out and the intrinsic-value side
+carried by FCFE plus relative. The tilt is **asymmetric on purpose**:
+up to **+15 pp** toward DDM (for mature payers with strong track
+records), and up to **−45 pp** away from DDM (because the DDM
+mechanically under-prices low-payout retainers, so when the two tracks
+disagree sharply for a reinvestor like an IT name, the relative + FCFE
+legs have to carry more weight). The default for a typical 50/50
+candidate stays exactly 50/50.
+
+### 3a. Three-way blend with FCFE
+
+Once FCFE landed, the blend gained a third leg. The asymmetric tilt
+logic above still decides the DDM weight; the remaining `(1 − w_ddm)`
+splits between FCFE and Relative on a payout-bucket rule:
+
+| Payout | FCFE share of remainder | Rel share of remainder |
+|---|---|---|
+| < 20% | 70% | 30% |
+| 20–50% | 50% | 50% |
+| ≥ 50% | 30% | 70% |
+
+Special case: when the DDM returns `valid=False` (e.g. the
+sub-5%-payout near-non-payer guard fires), `w_ddm` is forced to **0**
+and the full 100% splits FCFE/Rel per the same payout rule. This is
+exactly the case FCFE was added to handle: SIEMENS-style retainers
+where DDM has no signal but the firm's underlying cash generation is
+real.
+
+Worked examples (live numbers from the engine):
+
+| Stock | Payout | Branch | w_DDM | w_FCFE | w_Rel |
+|---|---|---|---|---|---|
+| SIEMENS.NS | 0.3% | `fcfe_ddm_invalid_low_payout` | 0% | 70% | 30% |
+| ITC.NS | 87% | `fcfe_high_payout` | 40% | 18% | 42% |
+| TCS.NS | ~30% | `fcfe_mid_payout` | ~45% | ~28% | ~28% |
+| HDFCBANK.NS | n/a | `two_way_fallback` | (legacy) | 0% | (legacy) |
 
 ### 4. The originality work — what most student projects skip
 
@@ -280,19 +338,25 @@ print(result.reverse_dcf.summary())
   Tata Consultancy Services Limited  (TCS.NS)  |  Sector: Information Technology
 ==============================================================================
   Current Market Price       : ₹  3,520.40
-  DDM Intrinsic Value        : ₹  3,940.12   (Three-Stage DDM)
-  Relative Intrinsic Value   : ₹  4,180.55   (multi-multiple weighted)
-  Blended Intrinsic Value    : ₹  4,051.20   (weights: DDM 55%, Rel 45%)
-  Monte Carlo P10/P50/P90    : ₹  3,612.40 / ₹  4,038.10 / ₹  4,488.70
+  DDM Intrinsic Value        : ₹  2,412.41   (Three-Stage DDM)
+  FCFE Intrinsic Value       : ₹  2,180.50   (Two-stage FCFE)
+  Relative Intrinsic Value   : ₹  2,400.73   (multi-multiple weighted)
+  Blended Intrinsic Value    : ₹  2,336.10   (DDM 45% · FCFE 28% · Rel 27%)
+  Monte Carlo P10/P50/P90    : ₹  2,015.20 / ₹  2,328.40 / ₹  2,679.10
   Cost of Equity (CAPM)      :     12.85%
   Quality Composite (0-100)  :       82.4
   Data Quality (0-100)       :       91.0
-  Margin of Safety           :     13.10%
-  Recommendation             :  HOLD  🟡  (confidence: HIGH)
+  Margin of Safety           :    −33.66%
+  Recommendation             :  SELL  🔴  (confidence: HIGH)
+  Branch taken               :  fcfe_mid_payout
   Reverse DCF: market is pricing in g = 9.4% (vs historical 14.2%) —
     implied growth is 4.8 pp BELOW historical; expectations look conservative.
 ==============================================================================
 ```
+
+(Numbers above are illustrative of the new three-way output structure;
+actual values depend on the day's price and yfinance data state. Run
+`python run_valuation.py --ticker TCS.NS` to get a live snapshot.)
 
 ---
 
@@ -306,27 +370,31 @@ integrated-equity-valuation-india/
 ├── app.py                          # Streamlit dashboard
 ├── run_valuation.py                # CLI entry point
 ├── src/
-│   ├── data_fetcher.py             # NSE/BSE pull + multi-stage fallback
+│   ├── data_fetcher.py             # NSE/BSE pull + multi-stage fallback + cash-flow series
 │   ├── data_validation.py          # Data quality scoring + guards
 │   ├── exceptions.py               # Typed error hierarchy
 │   ├── logging_setup.py            # Centralized logging
 │   ├── ddm_models.py               # Gordon / 2-stage / 3-stage / H-Model
+│   ├── fcfe_valuation.py           # Two-stage FCFE intrinsic value (Phase A)
 │   ├── cost_of_equity.py           # CAPM, beta regression, Hamada
 │   ├── peer_identification.py      # K-Means + Mahalanobis peer selection
 │   ├── relative_valuation.py       # Multiples + sector-aware weighting
 │   ├── quality_score.py            # Piotroski F + Altman Z'' + dividend + momentum
 │   ├── earnings_momentum.py        # Quarterly trend vs peer median (0-10)
-│   ├── sensitivity.py              # Tornado + vectorised Monte Carlo
+│   ├── sensitivity.py              # Tornado + vectorised 2-way and 3-way Monte Carlo
 │   ├── reverse_dcf.py              # Implied-expectations solver
 │   ├── backtest.py                 # Forward-return grading
-│   ├── integrated_valuation.py     # The pipeline that wires it all
-│   ├── visualizations.py           # Plotly charts
-│   └── report_generator.py         # PDF research note
+│   ├── integrated_valuation.py     # Pipeline + asymmetric tilt + three-way blend
+│   ├── visualizations.py           # Plotly charts (FCFE bar shown when applicable)
+│   └── report_generator.py         # PDF research note (FCFE section + branch tag)
+├── scripts/
+│   ├── audit_cashflow_coverage.py  # Field-coverage audit across DEFAULT_UNIVERSE
+│   └── verify_wc_sign.py           # Empirical ΔWC sign-convention probe
 ├── data/
 │   └── nifty500_universe.csv       # Sector-mapped universe
-├── tests/                          # 129 tests, runs in ~2 seconds
+├── tests/                          # 209 tests, runs in ~2.5 seconds
 │   ├── conftest.py                 # Shared fixtures
-│   ├── _factory.py                 # Synthetic StockBundle factory
+│   ├── _factory.py                 # Synthetic StockBundle factory (incl. sparse-history)
 │   ├── test_valuation.py
 │   ├── test_edge_cases.py
 │   ├── test_data_validation.py
@@ -340,10 +408,27 @@ integrated-equity-valuation-india/
 │   ├── test_quality_score.py
 │   ├── test_report_generator.py
 │   ├── test_app_smoke.py
-│   └── test_exceptions.py
+│   ├── test_exceptions.py
+│   ├── test_cashflow_fields.py     # Phase A.0: ΔWC sign, substring disambig
+│   ├── test_pickle_backcompat.py   # Phase A.0: cache schema migration
+│   ├── test_fcfe_textbook.py       # Phase A: collapses-to-Gordon, taper
+│   ├── test_fcfe_applicability.py  # Phase A: financials excluded, ≥3y threshold
+│   ├── test_fcfe_caps.py           # Phase A: g/ke/DR clamps
+│   ├── test_three_way_blend.py     # Phase A: all branches, weights sum to 1.0
+│   └── test_fcfe_mc_integration.py # Phase A: 3-way MC, runtime budget
 ├── reports/                        # Generated PDFs and backtest logs
-└── cache/                          # On-disk financials cache
+└── cache/                          # On-disk financials cache (schema-versioned)
 ```
+
+### Cache schema versioning
+
+`StockBundle` is versioned via the `CACHE_SCHEMA_VERSION` constant in
+`src/data_fetcher.py`. When a field is added, `__setstate__` is extended
+to backfill that field on unpickle and stamp the bundle with the current
+version (shim-and-backfill policy). The shim is ~10 lines per migration
+and lets users keep their accumulated local cache across upgrades — a
+deliberate reversal of an earlier wipe-on-change policy that proved
+hostile to incremental adoption.
 
 ---
 
@@ -353,15 +438,28 @@ integrated-equity-valuation-india/
 pytest tests/ -v
 ```
 
-Currently **129 tests, all passing in ~2 seconds**. Coverage spans:
+Currently **209 tests, all passing in ~2.5 seconds**. Coverage spans:
 
 - DDM closed forms checked against textbook (Damodaran) values
+- FCFE closed form collapses to a Gordon perpetuity when growth is
+  uniform (relative error < 0.01% vs. hand-computed value)
+- ΔWC sign convention pinned against TCS FY24/FY26 and ITC FY24/FY26
+  via the operating-cash-flow identity (`scripts/verify_wc_sign.py`)
+- Substring-disambiguation guard: `_first_present()` picks
+  `Current Assets` over `Other Current Assets` / `Total Non Current
+  Assets` even when the latter appear first in the DataFrame index
 - Bayesian shrinkage invariants (n→0 returns prior; n→∞ returns data)
 - Reverse-DCF round-trip property (price the model's own output → recover input)
-- Edge cases: loss-makers, non-payers, negative book value, thin history
+- Three-way blend weight invariant: `w_ddm + w_fcfe + w_rel == 1.0`
+  across every combination of payout, DDM validity, and FCFE
+  applicability (20 parametrized cases)
+- Edge cases: loss-makers, non-payers, negative book value, thin history,
+  financial-sector FCFE exclusion
 - Synthetic peer sets through the relative-valuation pipeline
 - Typed-exception hierarchy (every error reachable from the root class)
 - Backtest binning, spread calculation, and survivorship-bias accounting
+- Cache-schema migration: synthesised v1 pickles unpickle and migrate
+  up to current version cleanly under `__setstate__`
 
 ---
 
@@ -387,11 +485,24 @@ A few things this engine does *not* claim to do:
 
 ---
 
+## Roadmap
+
+Tracked methodology improvements (open issues on GitHub):
+
+- **[#3 Payout ratio clipping](https://github.com/Vaibhavkkm/integrated-equity-valuation-india/issues/3):** high-payout firms like TCS surface a clipped payout value that distorts the blend tilt and the FCFE/Rel split bucket selection. Per-stock input fix, scope confined to the data fetcher.
+- **[#4 Sum-of-the-Parts valuation](https://github.com/Vaibhavkkm/integrated-equity-valuation-india/issues/4):** conglomerate decomposition for the relative leg. Initial targets: ITC, RELIANCE, LT, GRASIM, M&M. Replaces the firm-level peer multiple with a segment-EBIT-weighted sum for tagged tickers.
+- **[#5 Through-cycle normalization](https://github.com/Vaibhavkkm/integrated-equity-valuation-india/issues/5):** replace TTM EPS with the 5y median in the relative leg for tagged cyclicals (BHEL, ferrous and non-ferrous metals, refining/OMCs, sugar, paper, commodity chemicals). Avoids extrapolating peak-cycle earnings as permanent.
+
+All three are independent and can land in any order. No milestone assigned: the work happens when it happens.
+
+---
+
 ## Academic positioning
 
 The methodology draws on:
 
-- **Damodaran, A.** — *Investment Valuation*, 3rd ed.
+- **Damodaran, A.** — *Investment Valuation*, 3rd ed. (DDM, FCFE
+  two-stage formulation, asset-side ΔWC sign convention).
 - **Gordon, M. J.** (1959) — *Dividends, Earnings and Stock Prices*.
 - **Fuller, R. J. & Hsia, C. C.** (1984) — *A Simplified Common Stock
   Valuation Model* (the H-Model).
@@ -407,7 +518,7 @@ The methodology draws on:
 ## Author
 
 **Vaibhav Mangroliya** — built as the SEM-4 Student Project under the
-supervision of **Mr. Senthil Nagarajan**.
+supervision of **Dr. Senthil Murugan NAGARAJAN**.
 
 Submitted in partial fulfilment of the SEM-4 Student Project
 requirement.

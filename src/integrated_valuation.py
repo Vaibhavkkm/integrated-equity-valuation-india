@@ -60,6 +60,7 @@ from src.data_validation import DataQualityReport, validate_bundle
 from src.ddm_models import IntrinsicValue, select_and_value
 from src.earnings_momentum import EarningsMomentum, earnings_momentum
 from src.exceptions import InvalidInputError
+from src.fcfe_valuation import FCFEResult, fcfe_applicable, fcfe_value
 from src.logging_setup import get_logger
 from src.peer_identification import PeerSet, find_peers
 from src.quality_score import QualityScore, quality_score
@@ -69,6 +70,7 @@ from src.sensitivity import (
     MonteCarloResult,
     TornadoBar,
     monte_carlo_blended,
+    monte_carlo_three_way,
     tornado_ddm,
 )
 
@@ -101,6 +103,16 @@ class ValuationResult:
     reverse_dcf: ImpliedExpectations
 
     base_g_terminal: float
+    # Phase A: FCFE leg + three-way blend metadata. When FCFE is not
+    # applicable, ``fcfe.valid`` is False and ``weight_fcfe`` is 0,
+    # so the headline numbers match the pre-Phase-A two-way pipeline
+    # bit-for-bit.
+    fcfe: FCFEResult = field(default_factory=lambda: FCFEResult(
+        value_per_share=float("nan"), valid=False,
+        reason_invalid="not computed",
+    ))
+    weight_fcfe: float = 0.0
+    blend_branch: str = "two_way_fallback"
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     notes: list[str] = field(default_factory=list)
 
@@ -215,6 +227,162 @@ def _blend_weights(
     tilt = float(np.clip(tilt, -0.45, 0.15))
     w_ddm = float(np.clip(base_w_ddm + tilt, 0.10, 0.80))
     return w_ddm, 1 - w_ddm
+
+
+# ---------------------------------------------------------------------------
+# Three-way blend (Phase A) — wraps _blend_weights, does not replace it
+# ---------------------------------------------------------------------------
+@dataclass
+class ThreeWayBlend:
+    """Three-leg blend result: ``w_ddm * V_DDM + w_fcfe * V_FCFE + w_rel * V_Rel``.
+
+    ``branch_taken`` is a diagnostic string the UI surfaces in the
+    weight badge / report so a reader can tell at a glance whether
+    FCFE was applied and which payout-bucket the firm landed in.
+    """
+
+    value: float
+    w_ddm: float
+    w_fcfe: float
+    w_rel: float
+    branch_taken: str  # "two_way_fallback" | "fcfe_low_payout" | "fcfe_mid_payout" | "fcfe_high_payout" | "fcfe_ddm_invalid_low" | ...
+
+
+def _fcfe_rel_split(payout: float) -> tuple[float, float]:
+    """Return (fcfe_share, rel_share) per Phase A directive #3 splits.
+
+    These shares apply to whatever weight slot the DDM does not claim
+    in branches 2 and 3 of ``blend_three_way`` (the slot is 100% in
+    branch 2 — DDM invalid — and ``1 − w_ddm_legacy`` in branch 3).
+    """
+    if payout < 0.20:
+        return SETTINGS.fcfe_split_low_payout
+    if payout < 0.50:
+        return SETTINGS.fcfe_split_mid_payout
+    return SETTINGS.fcfe_split_high_payout
+
+
+def _payout_bucket_tag(payout: float) -> str:
+    if payout < 0.20:
+        return "low_payout"
+    if payout < 0.50:
+        return "mid_payout"
+    return "high_payout"
+
+
+def blend_three_way(
+    ddm: IntrinsicValue,
+    rel: RelativeValuation,
+    fcfe: FCFEResult,
+    quality: QualityScore,
+    target: StockBundle,
+) -> ThreeWayBlend:
+    """Three-way blend extending the existing two-way `_blend_weights`.
+
+    Wraps ``_blend_weights`` rather than replacing it (Phase A
+    directive #5) so the asymmetric tilt logic remains the single
+    source of truth for the DDM weight. Three branches:
+
+      * **Branch 1 — FCFE not applicable.** Two-way blend, identical
+        behaviour to pre-Phase-A. ``w_fcfe = 0``, ``w_ddm`` and
+        ``w_rel`` come straight from ``_blend_weights``. The total
+        value is bit-equivalent to the legacy pipeline.
+
+      * **Branch 2 — DDM invalid AND FCFE applicable.** Directive #4
+        override: force ``w_ddm = 0`` regardless of what
+        ``_blend_weights`` returns (which would be (0, 1) — pure
+        relative — but that's the wrong call when FCFE can carry the
+        intrinsic-value side). Split the full 100% between FCFE and
+        Rel per the payout-bucket rule.
+
+      * **Branch 3 — DDM valid AND FCFE applicable.** Keep
+        ``w_ddm = w_ddm_legacy`` so the existing tilt logic
+        continues to decide the dividend leg. Split the remaining
+        ``1 − w_ddm`` between FCFE and Rel per the payout rule.
+
+    Invariant: ``w_ddm + w_fcfe + w_rel == 1.0`` in all branches.
+    """
+    w_ddm_legacy, w_rel_legacy = _blend_weights(ddm, rel, quality, target)
+
+    # Validity gates ----------------------------------------------------
+    rel_valid = (
+        rel.weighted_value is not None
+        and np.isfinite(rel.weighted_value)
+        and rel.weighted_value > 0
+    )
+    rel_val = float(rel.weighted_value) if rel_valid else 0.0
+
+    # Branch 1 — FCFE not applicable: fall back to two-way exactly.
+    if not fcfe.valid:
+        if ddm.valid and rel_valid:
+            value = w_ddm_legacy * ddm.value_per_share + w_rel_legacy * rel_val
+        elif ddm.valid:
+            value = float(ddm.value_per_share)
+        else:
+            value = rel_val
+        return ThreeWayBlend(
+            value=float(value),
+            w_ddm=w_ddm_legacy,
+            w_fcfe=0.0,
+            w_rel=w_rel_legacy,
+            branch_taken="two_way_fallback",
+        )
+
+    fcfe_val = float(fcfe.value_per_share)
+
+    # Payout drives the FCFE-vs-Rel split in branches 2 and 3.
+    payout = (
+        float(target.payout_ratio)
+        if (target.payout_ratio is not None and np.isfinite(target.payout_ratio))
+        else 0.0
+    )
+    fcfe_share, rel_share = _fcfe_rel_split(payout)
+    bucket = _payout_bucket_tag(payout)
+
+    # Branch 2 — DDM invalid (e.g. payout < 5% guard fired), FCFE applicable.
+    # Force w_ddm = 0 and let FCFE/Rel carry it.
+    if not ddm.valid:
+        w_fcfe = fcfe_share
+        w_rel = rel_share
+        # Edge case: if rel is itself invalid here, redirect its share
+        # to FCFE so the weights still sum to 1.
+        if not rel_valid:
+            w_fcfe += w_rel
+            w_rel = 0.0
+            value = w_fcfe * fcfe_val
+        else:
+            value = w_fcfe * fcfe_val + w_rel * rel_val
+        return ThreeWayBlend(
+            value=float(value),
+            w_ddm=0.0,
+            w_fcfe=w_fcfe,
+            w_rel=w_rel,
+            branch_taken=f"fcfe_ddm_invalid_{bucket}",
+        )
+
+    # Branch 3 — both DDM and FCFE valid. Existing tilt decides
+    # w_ddm; the remainder splits FCFE/Rel.
+    remainder = 1.0 - w_ddm_legacy
+    w_fcfe = remainder * fcfe_share
+    w_rel = remainder * rel_share
+    if not rel_valid:
+        # Rel invalid — give its slice to FCFE.
+        w_fcfe += w_rel
+        w_rel = 0.0
+        value = w_ddm_legacy * ddm.value_per_share + w_fcfe * fcfe_val
+    else:
+        value = (
+            w_ddm_legacy * ddm.value_per_share
+            + w_fcfe * fcfe_val
+            + w_rel * rel_val
+        )
+    return ThreeWayBlend(
+        value=float(value),
+        w_ddm=w_ddm_legacy,
+        w_fcfe=w_fcfe,
+        w_rel=w_rel,
+        branch_taken=f"fcfe_{bucket}",
+    )
 
 
 def _recommendation(
@@ -440,16 +608,26 @@ def value_stock(
                  q.composite, q.piotroski_f, q.dividend_quality, q.earnings_momentum)
 
     # ------------------------------------------------------------------
-    # 7. Blend
+    # 7. FCFE + three-way blend (Phase A)
     # ------------------------------------------------------------------
-    w_ddm, w_rel = _blend_weights(ddm, rel, q, target)
+    # FCFE only runs when the bundle satisfies fcfe_applicable() —
+    # for financials (Banking/NBFC/Insurance) and short-history tickers
+    # this short-circuits cleanly and the blend collapses to the
+    # legacy two-way behaviour.
+    fcfe = fcfe_value(target, ke=coe.ke, terminal_g=g_term)
+    if verbose:
+        if fcfe.valid:
+            log.info("  FCFE: ₹%,.2f (g1=%.2f%%, DR=%.0f%%)",
+                     fcfe.value_per_share,
+                     fcfe.inputs["g1"] * 100, fcfe.inputs["dr"] * 100)
+        else:
+            log.info("  FCFE: skipped — %s", fcfe.reason_invalid)
 
-    if ddm.valid and np.isfinite(rel.weighted_value):
-        blended = w_ddm * ddm.value_per_share + w_rel * rel.weighted_value
-    elif ddm.valid:
-        blended = ddm.value_per_share
-    else:
-        blended = rel.weighted_value
+    blend = blend_three_way(ddm, rel, fcfe, q, target)
+    w_ddm = blend.w_ddm
+    w_rel = blend.w_rel
+    w_fcfe = blend.w_fcfe
+    blended = blend.value
 
     mos = (blended - target.price) / blended if (np.isfinite(blended) and blended > 0) else float("nan")
     rec = _recommendation(
@@ -481,7 +659,15 @@ def value_stock(
     # ------------------------------------------------------------------
     # 9. Monte Carlo + Tornado
     # ------------------------------------------------------------------
-    mc = monte_carlo_blended(target, coe, rel, g_term, w_ddm)
+    # Route to the three-way MC when FCFE is applicable; otherwise the
+    # legacy two-way runner is the regression baseline and stays
+    # bit-identical.
+    if fcfe.valid:
+        mc = monte_carlo_three_way(
+            target, coe, rel, fcfe, g_term, w_ddm, w_fcfe, w_rel,
+        )
+    else:
+        mc = monte_carlo_blended(target, coe, rel, g_term, w_ddm)
     tornado = tornado_ddm(target, coe.ke, g_term) if ddm.valid else []
 
     # ------------------------------------------------------------------
@@ -514,6 +700,9 @@ def value_stock(
         tornado=tornado,
         reverse_dcf=rev,
         base_g_terminal=g_term,
+        fcfe=fcfe,
+        weight_fcfe=w_fcfe,
+        blend_branch=blend.branch_taken,
         notes=notes,
     )
 

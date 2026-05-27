@@ -78,6 +78,36 @@ class ModelSettings:
     # Outlier trimming for relative valuation (each tail).
     multiple_trim_pct: float = 0.10
 
+    # ------------------------------------------------------------------
+    # FCFE (Phase A)
+    # ------------------------------------------------------------------
+    # Two-stage explicit forecast horizon. The final FCFE_TAPER_YEARS
+    # years fade growth linearly from g1 to terminal_g.
+    fcfe_stage1_years: int = 7
+    fcfe_taper_years: int = 2
+    # Stage-1 growth cap before Bayesian shrinkage.
+    fcfe_g1_cap: float = 0.15
+    # Debt ratio for net-borrowing assumption: 5y average D/(D+E),
+    # hard-capped here to prevent over-levered firms from amplifying
+    # the (1−DR) multiplier on net CapEx and ΔWC.
+    fcfe_debt_ratio_cap: float = 0.60
+    # Stage-1 growth must sit at least this far below Ke so the
+    # division in the Gordon perpetuity stays well-conditioned.
+    fcfe_ke_margin: float = 0.005
+    # Minimum years of cash-flow history before fcfe_applicable()
+    # returns True. The Phase A.0 audit found a median 4y coverage
+    # for non-financials; a 5y floor would over-exclude. See
+    # `project_phase_a_directives.md` directive #1.
+    fcfe_min_history_years: int = 3
+
+    # Three-way blend payout-rule splits (only used when FCFE
+    # applicable). Each tuple is (fcfe_share, rel_share); fcfe_share +
+    # rel_share = 1.0. The slot the DDM doesn't claim is split per
+    # these on the firm's TTM payout ratio.
+    fcfe_split_low_payout: tuple = (0.70, 0.30)     # payout < 20%
+    fcfe_split_mid_payout: tuple = (0.50, 0.50)     # 20% ≤ payout < 50%
+    fcfe_split_high_payout: tuple = (0.30, 0.70)    # payout ≥ 50%
+
 
 SETTINGS = ModelSettings()
 
@@ -214,9 +244,9 @@ DEFAULT_UNIVERSE: Dict[str, str] = {
 # Reporting metadata
 PROJECT_TITLE = "Integrated Equity Valuation of Indian Stocks"
 PROJECT_SUBTITLE = (
-    "Dividend Discount Model + Relative Valuation, credibility-weighted "
-    "(50/50 default for dividend payers; tilts toward Relative for low-payout firms)"
+    "DDM + FCFE + Relative Valuation, blended per-stock by credibility "
+    "(payout-aware weighting; FCFE auto-skipped when not applicable)"
 )
 AUTHOR_NAME = "Vaibhav Mangroliya"
-SUPERVISOR_NAME = "Mr. Senthil Nagarajan"
+SUPERVISOR_NAME = "Dr. Senthil Murugan NAGARAJAN"
 INSTITUTION = "Student Project — Semester IV"

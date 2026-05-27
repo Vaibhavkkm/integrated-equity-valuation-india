@@ -287,9 +287,15 @@ if result is not None:
 
     # Show how the blend was actually weighted, not just the headline
     # 50/50 from the brief — for non-payers it collapses to 100% Relative
-    # and the viewer needs to see that on the card.
+    # and the viewer needs to see that on the card. With Phase A's three-
+    # way blend, FCFE earns a slot in the badge whenever applicable.
     if is_na:
         blend_label = "—"
+    elif result.fcfe.valid and result.weight_fcfe > 0:
+        blend_label = (
+            f"DDM {result.weight_ddm:.0%} · FCFE {result.weight_fcfe:.0%} "
+            f"· Rel {result.weight_relative:.0%}"
+        )
     elif result.ddm.valid:
         blend_label = (
             f"DDM {result.weight_ddm:.0%} · Rel {result.weight_relative:.0%}"
@@ -329,9 +335,9 @@ if result is not None:
     st.markdown("---")
 
     # ---- Tabbed body ----
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "📈 Overview", "🧮 DDM detail", "🤝 Peers & Multiples",
-        "🎲 Monte Carlo", "🌪️ Sensitivity", "📄 Report"
+    tab1, tab2, tab_fcfe, tab3, tab4, tab5, tab6 = st.tabs([
+        "📈 Overview", "🧮 DDM detail", "💵 FCFE detail",
+        "🤝 Peers & Multiples", "🎲 Monte Carlo", "🌪️ Sensitivity", "📄 Report"
     ])
 
     with tab1:
@@ -378,6 +384,84 @@ if result is not None:
             df = result.target.dividends_annual.copy()
             df.index = df.index.year
             st.bar_chart(df)
+
+    with tab_fcfe:
+        if result.fcfe.valid:
+            st.subheader(
+                f"FCFE Intrinsic Value: ₹{result.fcfe.value_per_share:,.2f}"
+            )
+            st.caption(
+                "Two-stage Free-Cash-Flow-to-Equity valuation. Stage 1: "
+                f"{result.fcfe.inputs['stage1_years']}-year explicit forecast "
+                "with linear growth taper in the final 2 years. Stage 2: "
+                "Gordon perpetuity at terminal growth."
+            )
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**Latest-year inputs (₹)**")
+                st.json({
+                    "Net Income":          round(result.fcfe.inputs["ni0"], 0),
+                    "CapEx":               round(result.fcfe.inputs["capex0"], 0),
+                    "D&A":                 round(result.fcfe.inputs["da0"], 0),
+                    "ΔWC (yfinance sign)": round(result.fcfe.inputs["wc0_yf"], 0),
+                    "Base FCFE (yr 0)":    round(result.fcfe.inputs["base_fcfe"], 0),
+                })
+            with c2:
+                st.markdown("**Growth & discount**")
+                g_sgr = result.fcfe.inputs.get("g_sgr")
+                growth_view = {
+                    "Historical EPS CAGR (capped 15%)": f"{result.fcfe.inputs['g_eps_cagr']:.2%}",
+                    "Sustainable growth (ROE × retention)": (
+                        f"{g_sgr:.2%}" if g_sgr is not None else "—"
+                    ),
+                    "Stage-1 growth (Bayes-shrunk blend)": f"{result.fcfe.inputs['g1']:.2%}",
+                    "Terminal growth":                     f"{result.fcfe.inputs['g_terminal']:.2%}",
+                    "Cost of equity (Ke)":                 f"{result.fcfe.inputs['ke']:.2%}",
+                    "Debt ratio (5y avg)":                 f"{result.fcfe.inputs['dr']:.2%}",
+                }
+                st.json(growth_view)
+
+            st.markdown("**Year-by-year FCFE forecast**")
+            yby = result.fcfe.year_by_year.copy()
+            yby_display = pd.DataFrame({
+                "Year":           yby["year"].astype(int),
+                "Growth":         yby["growth"].map(lambda x: f"{x:.2%}"),
+                "FCFE (₹)":       yby["fcfe"].map(lambda x: f"{x:,.0f}"),
+                "PV (₹)":         yby["pv"].map(lambda x: f"{x:,.0f}"),
+                "Σ PV explicit":  yby["pv_cumulative"].map(lambda x: f"{x:,.0f}"),
+            })
+            st.dataframe(yby_display, use_container_width=True, hide_index=True)
+
+            st.markdown("**Terminal value**")
+            tv_col1, tv_col2 = st.columns(2)
+            tv_col1.metric(
+                "Terminal Value (Gordon)",
+                f"₹{result.fcfe.terminal_value:,.0f}",
+            )
+            tv_col2.metric(
+                "PV(Terminal Value)",
+                f"₹{result.fcfe.pv_terminal:,.0f}",
+            )
+
+            st.caption(
+                "Sign convention reminder: ΔWC follows yfinance's cash-flow-"
+                "statement view (positive = cash freed by WC reduction). "
+                "The FCFE formula reads `NI − (CapEx − D&A)(1−DR) + ΔWC_yf(1−DR)`. "
+                "Empirical verification: TCS FY24 NI ₹46,099 cr matches the "
+                "published annual report."
+            )
+        else:
+            st.subheader("FCFE not applicable for this stock")
+            st.info(
+                f"**Reason:** {result.fcfe.reason_invalid}\n\n"
+                "FCFE values the cash flow available to equity holders after "
+                "reinvestment — useful for low-payout reinvesting firms whose "
+                "DDM-implied value is uninformatively low. It is *not* "
+                "applicable to financial firms (Banking, NBFC, Insurance), "
+                "which need FCFF or regulated-capital DDM instead, or to "
+                "tickers with less than 3 years of cash-flow history."
+            )
 
     with tab3:
         st.subheader("Peer set")
